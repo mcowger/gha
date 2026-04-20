@@ -48,12 +48,26 @@ const llmLimit = pLimit({ concurrency: LLM_CONCURRENCY });
 async function gitCommitAndPush(message: string): Promise<void> {
   try {
     const dir = process.cwd();
+    const token = process.env.GH_TOKEN;
+    const remote = (await git.listRemotes({ fs, dir }))[0]?.remote || 'origin';
+    const branch = (await git.currentBranch({ fs, dir })) || 'main';
+    const repoUrl = `https://mcowger:${token}@github.com/mcowger/gha.git`;
+
+    const auth = { username: 'mcowger', password: token };
+    const http = await import('isomorphic-git/http/node').then(m => m.default);
+
+    // Pull first to avoid fast-forward rejection
+    try {
+      await git.pull({ fs, http, dir, remote, ref: branch, url: repoUrl, onAuth: () => auth, singleBranch: true });
+    } catch {
+      // Pull may fail if no remote changes — that's fine
+    }
 
     // Stage output files
     const pattern = 'output/';
     const matrix = await git.statusMatrix({ fs, dir, filter: (f: string) => f.startsWith(pattern) });
 
-    const changes = matrix.filter((row: Array<string | number>) => row[1] !== row[2]); // working tree differs from index
+    const changes = matrix.filter((row: Array<string | number>) => row[1] !== row[2]);
     if (changes.length === 0) {
       console.log('  📭 No changes to commit');
       return;
@@ -67,21 +81,8 @@ async function gitCommitAndPush(message: string): Promise<void> {
     // Commit
     await git.commit({ fs, dir, message, author: { name: 'gha-bot', email: 'bot@gha.local' } });
 
-    // Push
-    const remote = (await git.listRemotes({ fs, dir }))[0]?.remote || 'origin';
-    const branch = (await git.currentBranch({ fs, dir })) || 'main';
-    const token = process.env.GH_TOKEN;
-    const repoUrl = `https://mcowger:${token}@github.com/mcowger/gha.git`;
-
-    await git.push({
-      fs,
-      http: await import('isomorphic-git/http/node').then(m => m.default),
-      dir,
-      remote,
-      ref: branch,
-      url: repoUrl,
-      onAuth: () => ({ username: 'mcowger', password: token }),
-    });
+    // Push (force to handle any divergence from CI commits)
+    await git.push({ fs, http, dir, remote, ref: branch, url: repoUrl, onAuth: () => auth, force: true });
 
     console.log(`  📤 Pushed: ${message}`);
   } catch (err) {
