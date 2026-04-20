@@ -1,0 +1,20 @@
+{
+  "name": "github-awesome-monitor",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/index.ts"
+  },
+  "dependencies": {
+    "@octokit/rest": "latest",
+    "cli-progress": "^3.12.0",
+    "dotenv": "latest",
+    "multi-llm-ts": "latest",
+    "p-limit": "^7.3.0",
+    "youtubei.js": "latest"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "latest"
+  }
+}
