@@ -102,9 +102,22 @@ export async function getChannelVideos(
  */
 export async function getVideoDescription(videoId: string): Promise<string> {
   const yt = await getYT();
-  const info = await yt.getBasicInfo(videoId);
-  const description = info.basic_info.short_description || '';
-  return description;
+
+  // Try multiple InnerTube clients — some clients/regions return empty descriptions.
+  // The default client works locally but may return empty in CI.
+  const clients: Array<undefined | 'WEB_EMBEDDED' | 'ANDROID' | 'MWEB'> = [undefined, 'WEB_EMBEDDED', 'ANDROID', 'MWEB'];
+
+  for (const client of clients) {
+    try {
+      const info = await yt.getBasicInfo(videoId, client ? { client } : undefined);
+      const description = info.basic_info.short_description || '';
+      if (description) return description;
+    } catch {
+      // Some clients throw for certain videos, just try the next one
+    }
+  }
+
+  return '';
 }
 
 /**
