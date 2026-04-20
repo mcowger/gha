@@ -185,6 +185,11 @@ async function fetch(): Promise<void> {
   for (const video of newVideos) {
     try {
       const desc = await getVideoDescription(video.id);
+      if (!desc) {
+        console.log(`  ⚠️  Empty description for ${video.title}`);
+        videoProjectCounts.set(video.id, 0);
+        continue;
+      }
       videoDescriptions.set(video.id, desc);
       let projects = parseGitHubUrls(desc);
       if (projects.length === 0) {
@@ -193,7 +198,9 @@ async function fetch(): Promise<void> {
       }
       videoProjectCounts.set(video.id, projects.length);
       totalProjects += projects.length;
-    } catch {
+      console.log(`  📋 ${video.title}: ${projects.length} projects`);
+    } catch (err) {
+      console.log(`  ❌ Pre-flight failed for ${video.title}: ${err instanceof Error ? err.message : err}`);
       videoProjectCounts.set(video.id, 0);
     }
   }
@@ -204,9 +211,10 @@ async function fetch(): Promise<void> {
 
   // 5. Process all new videos in parallel
   const results = await Promise.all(
-    newVideos.map((video) =>
-      videoLimit(() => processVideoWithDescription(video, videoDescriptions.get(video.id)!, state)),
-    ),
+    newVideos.map((video) => {
+      const description = videoDescriptions.get(video.id) || '';
+      return videoLimit(() => processVideoWithDescription(video, description, state));
+    }),
   );
 
   stopDashboard();
