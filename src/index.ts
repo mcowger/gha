@@ -63,19 +63,58 @@ async function gitCommitAndPush(message: string): Promise<void> {
       // Pull may fail if no remote changes — that's fine
     }
 
-    // Stage output files
+    // Stage output files and check for actual content changes
     const pattern = 'output/';
     const matrix = await git.statusMatrix({ fs, dir, filter: (f: string) => f.startsWith(pattern) });
 
-    const changes = matrix.filter((row: Array<string | number>) => row[1] !== row[2]);
-    if (changes.length === 0) {
+    // Rows where working tree differs from HEAD (index 2 !== index 0)
+    // 0 = HEAD, 1 = index, 2 = working tree
+    const changed = matrix.filter((row: Array<string | number>) => {
+      // Untracked or modified
+      return row[0] === 0 && row[1] === 0 // new file
+        || row[1] !== row[2]; // modified
+    });
+
+    if (changed.length === 0) {
       console.log('  📭 No changes to commit');
       return;
     }
 
-    // Stage all changed output files
-    for (const [filepath] of changes) {
+    // Stage all changed files
+    for (const [filepath] of changed) {
       await git.add({ fs, dir, filepath });
+    }
+
+    // Now that files are staged, compare staged content vs HEAD
+    // to detect if content is truly different (not just timestamps)
+    let hasRealChanges = false;
+    for (const [filepath, headSha] of changed) {
+      if (headSha === 0) {
+        // New file — definitely a real change
+        hasRealChanges = true;
+        break;
+      }
+      // Compare HEAD blob vs current working tree content
+      try {
+        const headBlob = await git.readBlob({ fs, dir, oid: await git.resolveRef({ fs, dir, ref: 'HEAD' }), filepath: String(filepath) });
+        const headContent = Buffer.from(headBlob.blob).toString('utf-8');
+        const workContent = fs.readFileSync(path.join(dir, String(filepath)), 'utf-8');
+        if (headContent !== workContent) {
+          hasRealChanges = true;
+          break;
+        }
+      } catch {
+        // If comparison fails, assume it's a real change
+        hasRealChanges = true;
+        break;
+      }
+    }
+
+    if (!hasRealChanges) {
+      console.log('  📭 No content changes to commit');
+      // Reset the staging area
+      await git.resetIndex({ fs, dir, filepath: '.' });
+      return;
     }
 
     // Commit
