@@ -27,6 +27,8 @@ const VIDEO_CONCURRENCY = parseInt(process.env.VIDEO_CONCURRENCY || '3', 10);
 const PROJECT_CONCURRENCY = parseInt(process.env.PROJECT_CONCURRENCY || '5', 10);
 const LLM_CONCURRENCY = parseInt(process.env.LLM_CONCURRENCY || '3', 10);
 const CRON_SCHEDULE = process.env.CRON_SCHEDULE || '';  // e.g. "0 */6 * * *"
+const GIT_REPO_URL = process.env.GIT_REPO_URL || 'https://github.com/mcowger/gha.git';
+const GIT_REPO_DIR = process.env.GIT_REPO_DIR || '/repo';
 
 function validateEnv(): void {
   const required = ['LLM_API_KEY'];
@@ -45,34 +47,57 @@ const llmLimit = pLimit({ concurrency: LLM_CONCURRENCY });
 
 // ── Git helpers ─────────────────────────────────────────────
 
+/**
+ * Ensure we have a cloned git repo to work in. If GIT_REPO_DIR doesn't exist,
+ * clone it. If it does, pull latest. Then chdir into it.
+ */
+async function gitInitOrPull(): Promise<void> {
+  const dir = GIT_REPO_DIR;
+  const token = process.env.GH_TOKEN;
+  const auth = { username: 'mcowger', password: token };
+  const http = await import('isomorphic-git/http/node').then(m => m.default);
+  const url = token
+    ? GIT_REPO_URL.replace('https://', `https://mcowger:${token}@`)
+    : GIT_REPO_URL;
+
+  if (!fs.existsSync(path.join(dir, '.git'))) {
+    console.log(`📋 Cloning ${GIT_REPO_URL} → ${dir}...`);
+    await git.clone({ fs, http, dir, url, onAuth: () => auth, singleBranch: true, depth: 50 });
+    console.log('  ✅ Repo cloned');
+  } else {
+    try {
+      const branch = (await git.currentBranch({ fs, dir })) || 'main';
+      const remote = (await git.listRemotes({ fs, dir }))[0]?.remote || 'origin';
+      await git.pull({ fs, http, dir, remote, ref: branch, url, onAuth: () => auth, singleBranch: true });
+      console.log('  ✅ Repo pulled');
+    } catch {
+      console.log('  ⚠️  Pull failed (may be ahead of remote)');
+    }
+  }
+
+  process.chdir(dir);
+}
+
 async function gitCommitAndPush(message: string): Promise<void> {
   try {
     const dir = process.cwd();
     const token = process.env.GH_TOKEN;
     const remote = (await git.listRemotes({ fs, dir }))[0]?.remote || 'origin';
     const branch = (await git.currentBranch({ fs, dir })) || 'main';
-    const repoUrl = `https://mcowger:${token}@github.com/mcowger/gha.git`;
+    const repoUrl = token
+      ? GIT_REPO_URL.replace('https://', `https://mcowger:${token}@`)
+      : GIT_REPO_URL;
 
     const auth = { username: 'mcowger', password: token };
     const http = await import('isomorphic-git/http/node').then(m => m.default);
 
-    // Pull first to avoid fast-forward rejection
-    try {
-      await git.pull({ fs, http, dir, remote, ref: branch, url: repoUrl, onAuth: () => auth, singleBranch: true });
-    } catch {
-      // Pull may fail if no remote changes — that's fine
-    }
-
-    // Stage output files and check for actual content changes
+    // Stage output files
     const pattern = 'output/';
     const matrix = await git.statusMatrix({ fs, dir, filter: (f: string) => f.startsWith(pattern) });
 
-    // Rows where working tree differs from HEAD (index 2 !== index 0)
-    // 0 = HEAD, 1 = index, 2 = working tree
     const changed = matrix.filter((row: Array<string | number>) => {
-      // Untracked or modified
-      return row[0] === 0 && row[1] === 0 // new file
-        || row[1] !== row[2]; // modified
+      return row[0] === 0 && row[1] === 0  // new file
+        || row[1] !== row[2];              // modified
     });
 
     if (changed.length === 0) {
@@ -85,18 +110,16 @@ async function gitCommitAndPush(message: string): Promise<void> {
       await git.add({ fs, dir, filepath });
     }
 
-    // Now that files are staged, compare staged content vs HEAD
-    // to detect if content is truly different (not just timestamps)
+    // Compare content vs HEAD to skip no-op commits
     let hasRealChanges = false;
     for (const [filepath, headSha] of changed) {
       if (headSha === 0) {
-        // New file — definitely a real change
         hasRealChanges = true;
         break;
       }
-      // Compare HEAD blob vs current working tree content
       try {
-        const headBlob = await git.readBlob({ fs, dir, oid: await git.resolveRef({ fs, dir, ref: 'HEAD' }), filepath: String(filepath) });
+        const headOid = await git.resolveRef({ fs, dir, ref: 'HEAD' });
+        const headBlob = await git.readBlob({ fs, dir, oid: headOid, filepath: String(filepath) });
         const headContent = Buffer.from(headBlob.blob).toString('utf-8');
         const workContent = fs.readFileSync(path.join(dir, String(filepath)), 'utf-8');
         if (headContent !== workContent) {
@@ -104,7 +127,6 @@ async function gitCommitAndPush(message: string): Promise<void> {
           break;
         }
       } catch {
-        // If comparison fails, assume it's a real change
         hasRealChanges = true;
         break;
       }
@@ -112,15 +134,14 @@ async function gitCommitAndPush(message: string): Promise<void> {
 
     if (!hasRealChanges) {
       console.log('  📭 No content changes to commit');
-      // Reset the staging area
-      await git.resetIndex({ fs, dir, filepath: '.' });
+      try { await git.resetIndex({ fs, dir, filepath: '.' }); } catch { /* ok */ }
       return;
     }
 
     // Commit
     await git.commit({ fs, dir, message, author: { name: 'gha-bot', email: 'bot@gha.local' } });
 
-    // Push (force to handle any divergence from CI commits)
+    // Push
     await git.push({ fs, http, dir, remote, ref: branch, url: repoUrl, onAuth: () => auth, force: true });
 
     console.log(`  📤 Pushed: ${message}`);
@@ -310,6 +331,8 @@ async function runOnce(): Promise<void> {
   console.log(`\n${'═'.repeat(50)}`);
   console.log(`  GithubAwesome Monitor — ${new Date().toISOString()}`);
   console.log(`${'═'.repeat(50)}\n`);
+
+  await gitInitOrPull();
 
   await fetch();
   console.log();
