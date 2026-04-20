@@ -43,7 +43,7 @@ All configuration is via environment variables (set in `.env` or exported):
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `YOUTUBE_CHANNEL_ID` | No | `UC9Rrud-8CaHokDtK9FszvRg` | YouTube channel ID to monitor |
-| `GITHUB_PERSONAL_ACCESS_TOKEN` | Recommended | — | GitHub PAT for API auth (5K vs 60 req/hr) |
+| `GH_TOKEN` | Recommended | — | GitHub PAT for API auth (5K vs 60 req/hr) |
 | `LLM_PROVIDER` | No | `openai` | Provider ID for multi-llm-ts |
 | `LLM_BASE_URL` | No | — | Base URL for the LLM API |
 | `LLM_API_KEY` | **Yes** | — | API key for the LLM provider |

@@ -10,10 +10,10 @@ let _authed: boolean | null = null;
 
 function getOctokit(): Octokit {
   if (!_octokit) {
-    const token = process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
+    const token = process.env.GH_TOKEN;
     _authed = !!token;
     if (!token) {
-      console.warn('⚠️  No GITHUB_PERSONAL_ACCESS_TOKEN set. Unauthenticated API limit is 60 requests/hour — likely insufficient for a full run.');
+      console.warn('⚠️  No GH_TOKEN set. Unauthenticated API limit is 60 requests/hour — likely insufficient for a full run.');
     }
     _octokit = new Octokit(token ? { auth: token } : {});
   }

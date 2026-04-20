@@ -13,7 +13,7 @@ bun run start fetch    # fetch only (API + LLM)
 bun run start render   # render existing JSON → HTML
 ```
 
-Requires a `.env` file — copy from `.env.example` and fill in credentials. The only strictly required variable is `LLM_API_KEY`. A `GITHUB_PERSONAL_ACCESS_TOKEN` is strongly recommended (60 vs 5,000 requests/hour).
+Requires a `.env` file — copy from `.env.example` and fill in credentials. The only strictly required variable is `LLM_API_KEY`. A `GH_TOKEN` is strongly recommended (60 vs 5,000 requests/hour).
 
 ## Architecture
 
@@ -30,7 +30,7 @@ Within the `fetch` phase, projects within each video are processed in parallel u
 - **`src/index.ts`** — CLI entry point with subcommands (`fetch`, `render`, or both). Loads state, fetches videos, processes each one, saves state after each video. Uses `p-limit` to process up to `PROJECT_CONCURRENCY` projects in parallel (default 5), with `LLM_CONCURRENCY` (default 3) parallel LLM summarization calls.
 - **`src/youtube.ts`** — Uses `youtubei.js` (YouTube InnerTube API). No API key required. Filters out Shorts by node type (`ReelItem`, `ShortsLockupView`) and duration (≤60s). The `duration` field from channel feed is `{text, seconds}` (not a plain number) — handled in `getChannelVideos`.
 - **`src/parser.ts`** — Regex-based GitHub URL extraction from description text. Deduplicates by `owner/repo`. Skips non-repo GitHub pages (features, pricing, etc.).
-- **`src/github.ts`** — Uses `@octokit/rest`. Reads `GITHUB_PERSONAL_ACCESS_TOKEN` (not `GITHUB_TOKEN`). Uses `repos.getReadme()` (not filename guessing) to fetch the default README. Only retries on 429, not 403. Uses `p-limit` with concurrency 5 for all API calls to avoid overwhelming GitHub's rate limits. Short-circuits README fetch if repo info returns 403.
+- **`src/github.ts`** — Uses `@octokit/rest`. Reads `GH_TOKEN` (not `GITHUB_TOKEN`). Uses `repos.getReadme()` (not filename guessing) to fetch the default README. Only retries on 429, not 403. Uses `p-limit` with concurrency 5 for all API calls to avoid overwhelming GitHub's rate limits. Short-circuits README fetch if repo info returns 403.
 - **`src/llm.ts`** — Uses `multi-llm-ts`. Configured via `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`. Truncates READMEs to 4,000 chars. Asks for 3-4 sentence prose summaries.
 - **`src/html.ts`** — Generates self-contained dark-themed HTML. Google Fonts (Inter) from CDN. Responsive card grid. Language badges with GitHub-style colors. Star counts.
 - **`src/render.ts`** — Reads/writes JSON data files and renders them to HTML. `writeReportJson()` saves a `VideoReport` as JSON. `readReportJson()` loads one. `renderAllJson()` renders all JSON files in the output dir to HTML.
@@ -97,7 +97,7 @@ The `.github/workflows/fetch.yml` workflow runs daily at 9am UTC (and on manual 
 2. Add the following **repository secrets** (Settings → Secrets → Actions):
    - `LLM_API_KEY` (required)
    - `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_MODEL` (optional, defaults to OpenAI)
-   - `GITHUB_PERSONAL_ACCESS_TOKEN` (recommended, for higher GitHub API limits)
+   - `GH_TOKEN` (recommended, for higher GitHub API limits)
    - `YOUTUBE_CHANNEL_ID` (optional, defaults to GithubAwesome channel)
 3. The `output/` directory is committed to the repo (not gitignored) so Pages can serve it
 4. Reports are live at `https://{user}.github.io/gha/`
@@ -111,6 +111,6 @@ bun -e "import { getChannelVideos } from './src/youtube.js'; const v = await get
 # Test URL parsing
 bun -e "import { parseGitHubUrls } from './src/parser.js'; console.log(parseGitHubUrls('00:12 - test https://github.com/owner/repo'));"
 
-# Test GitHub API (needs GITHUB_PERSONAL_ACCESS_TOKEN in env)
+# Test GitHub API (needs GH_TOKEN in env)
 bun -e "import { fetchProjectDetails } from './src/github.js'; const p = await fetchProjectDetails({owner:'cloudflare',repo:'agentic-inbox',url:'',readme:null,summary:null,description:null,stars:null,language:null}); console.log(p.stars, p.language, p.readme?.length);"
 ```
