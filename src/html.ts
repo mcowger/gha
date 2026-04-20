@@ -127,7 +127,8 @@ export function generateHtml(report: VideoReport): string {
     day: 'numeric',
   });
 
-  const projectsJson = JSON.stringify(report.projects);
+  // Escape </script> sequences in JSON to prevent breaking out of the HTML tag
+  const projectsJson = JSON.stringify(report.projects).replace(/<\/script/gi, '<\\/script');
   const colorsJson = JSON.stringify(LANG_COLORS);
 
   return `<!DOCTYPE html>
