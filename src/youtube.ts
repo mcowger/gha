@@ -15,8 +15,25 @@ export interface ChannelVideo {
   title: string;
   durationSeconds: number | undefined;
   publishedText: string | undefined;
+  uploadDate: string | null;
   thumbnails: { url: string; width: number; height: number }[];
   isShort: boolean;
+}
+
+/**
+ * Fetch the precise upload date for a video by scraping the watch page.
+ * YouTube InnerTube only returns relative text ("17 hours ago"), but the
+ * HTML page contains an ISO timestamp in the uploadDate microformat.
+ */
+export async function getVideoUploadDate(videoId: string): Promise<string | null> {
+  try {
+    const resp = await fetch(`https://www.youtube.com/watch?v=${videoId}`);
+    const html = await resp.text();
+    const match = html.match(/"uploadDate":"([^"]+)"/);
+    return match?.[1] || null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -86,6 +103,7 @@ export async function getChannelVideos(
       title: title || 'Untitled',
       durationSeconds,
       publishedText,
+      uploadDate: null, // fetched separately via getVideoUploadDate
       thumbnails,
       isShort: false,
     });

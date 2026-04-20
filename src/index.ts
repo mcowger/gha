@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { loadState, saveState, isReviewed } from './state.js';
-import { getChannelVideos, getVideoDescription, getPinnedComment } from './youtube.js';
+import { getChannelVideos, getVideoDescription, getVideoUploadDate, getPinnedComment } from './youtube.js';
 import { parseGitHubUrls, parseGitHubUrlsFromComment } from './parser.js';
 import { fetchProjectDetails, githubLimit } from './github.js';
 import { summarizeReadme } from './llm.js';
@@ -127,7 +127,7 @@ interface VideoResult {
 }
 
 async function processVideoWithDescription(
-  video: { id: string; title: string; publishedText?: string; thumbnails: { url: string }[] },
+  video: { id: string; title: string; publishedText?: string; uploadDate?: string | null; thumbnails: { url: string }[] },
   description: string,
   state: { videos: ReviewedVideo[] },
 ): Promise<VideoResult> {
@@ -166,6 +166,7 @@ async function processVideoWithDescription(
     videoId: video.id,
     title: video.title,
     publishedAt: video.publishedText || new Date().toISOString(),
+    uploadDate: video.uploadDate ?? null,
     thumbnailUrl: video.thumbnails[0]?.url || '',
     videoUrl: `https://www.youtube.com/watch?v=${video.id}`,
     projects: enrichedProjects,
@@ -227,6 +228,10 @@ async function fetch(): Promise<void> {
         if (comment) projects = parseGitHubUrlsFromComment(comment);
       }
       totalProjects += projects.length;
+
+      // Fetch precise upload date for sorting
+      video.uploadDate = await getVideoUploadDate(video.id);
+
       console.log(`  📋 ${video.title}: ${projects.length} projects`);
     } catch (err) {
       console.log(`  ❌ Pre-flight failed for ${video.title}: ${err instanceof Error ? err.message : err}`);

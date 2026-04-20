@@ -28,25 +28,41 @@ export function writeReportJson(
 function generateIndex(outputDir: string, htmlFiles: string[]): string | null {
   if (htmlFiles.length === 0) return null;
 
-  const reports: Array<{ filename: string; title: string; date: string; projectCount: number; videoUrl: string }> = [];
+  const reports: Array<{ filename: string; title: string; date: string; projectCount: number; videoUrl: string; sortKey: string }> = [];
 
   for (const htmlPath of htmlFiles) {
-    // Find matching JSON file
     const jsonName = basename(htmlPath, '.html') + '.json';
     const jsonPath = join(outputDir, jsonName);
     try {
       const report = readReportJson(jsonPath);
+      // Use uploadDate for precise sorting, fall back to filename date
+      const sortKey = report.uploadDate || report.publishedAt || basename(htmlPath);
+      const dateMatch = basename(htmlPath).match(/^ghawesome-(\d{4}-\d{2}-\d{2})/);
+      const fallbackDate = dateMatch ? dateMatch[1] : '';
+      // Format uploadDate for display
+      let displayDate = fallbackDate;
+      if (report.uploadDate) {
+        try {
+          displayDate = new Date(report.uploadDate).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+        } catch {
+          displayDate = fallbackDate;
+        }
+      }
       reports.push({
         filename: basename(htmlPath),
         title: report.title,
-        date: report.publishedAt,
+        date: displayDate,
         projectCount: report.projects.length,
         videoUrl: report.videoUrl,
+        sortKey,
       });
     } catch {
       // Skip if JSON not readable
     }
   }
+
+  // Sort newest first
+  reports.sort((a, b) => b.sortKey.localeCompare(a.sortKey));
 
   const html = generateIndexHtml(reports);
   const indexPath = join(outputDir, 'index.html');

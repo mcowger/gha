@@ -26,6 +26,7 @@ export interface VideoReport {
   videoId: string;
   title: string;
   publishedAt: string;
+  uploadDate: string | null;
   thumbnailUrl: string;
   videoUrl: string;
   projects: GitHubProject[];
