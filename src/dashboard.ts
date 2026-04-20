@@ -1,7 +1,7 @@
 /**
  * Live dashboard for GithubAwesome Monitor.
- * Uses an alternate screen buffer so the dashboard has its own
- * clean screen — no line-counting, no moveUp, no interference.
+ * In a real terminal: uses an alternate screen buffer for a clean TUI.
+ * In CI / non-TTY: falls back to plain console.log.
  */
 
 import type pLimit from 'p-limit';
@@ -16,11 +16,12 @@ const YELLOW = '\x1b[33m';
 const GRAY = '\x1b[90m';
 
 const CLEAR_SCREEN = '\x1b[2J';
-const HOME = '\x1b[H';           // cursor to top-left
+const HOME = '\x1b[H';
 const ALT_SCREEN = '\x1b[?1049h';
 const MAIN_SCREEN = '\x1b[?1049l';
 
 function out(s: string): void { process.stdout.write(s); }
+const isTty = process.stdout.isTTY;
 
 // ── Dashboard state ─────────────────────────────────────────
 interface DashboardState {
@@ -69,6 +70,11 @@ function concurrencyIndicator(active: number, max: number): string {
   return `${dots}  ${active}/${max}`;
 }
 
+function plainProgressBar(done: number, total: number): string {
+  if (total === 0) return `0/0`;
+  return `${done}/${total}`;
+}
+
 // ── Public API ──────────────────────────────────────────────
 
 export function initDashboard(
@@ -95,11 +101,13 @@ export function initDashboard(
     recentLines: [],
   };
 
-  // Switch to alternate screen buffer
-  out(ALT_SCREEN);
-  repaint();
-
-  repaintTimer = setInterval(repaint, 200);
+  if (isTty) {
+    out(ALT_SCREEN);
+    repaint();
+    repaintTimer = setInterval(repaint, 200);
+  } else {
+    console.log('🚀 GithubAwesome Monitor — CI mode (plain logging)\n');
+  }
 }
 
 export function stopDashboard(): void {
@@ -107,24 +115,43 @@ export function stopDashboard(): void {
     clearInterval(repaintTimer);
     repaintTimer = null;
   }
-  // Final repaint
-  repaint();
 
-  // Switch back to main screen buffer
-  out(MAIN_SCREEN);
+  if (isTty) {
+    repaint();
+    out(MAIN_SCREEN);
+  } else if (dashState) {
+    const s = dashState;
+    console.log(`\n✨ Done: ${s.videosDone}/${s.videosTotal} videos, ${s.projectsDone}/${s.projectsTotal} projects, ${s.reportsWritten} reports`);
+  }
+
   dashState = null;
 }
 
 export function setVideoTotal(n: number): void { ensureState().videosTotal = n; }
 export function setProjectTotal(n: number): void { const s = ensureState(); s.projectsTotal = n; s.llmTotal = n; }
 
-export function incVideosDone(): void { ensureState().videosDone++; }
-export function incProjectsDone(): void { ensureState().projectsDone++; }
+export function incVideosDone(): void {
+  const s = ensureState();
+  s.videosDone++;
+  if (!isTty) console.log(`  📹 Videos: ${plainProgressBar(s.videosDone, s.videosTotal)}`);
+}
+
+export function incProjectsDone(): void {
+  const s = ensureState();
+  s.projectsDone++;
+  if (!isTty && s.projectsDone % 5 === 0) console.log(`  📦 Projects: ${plainProgressBar(s.projectsDone, s.projectsTotal)}`);
+}
+
 export function incLlmDone(): void { ensureState().llmDone++; }
 export function incReportsWritten(): void { ensureState().reportsWritten++; }
 
-export function setCurrentVideo(label: string): void { ensureState().currentVideo = label; }
+export function setCurrentVideo(label: string): void {
+  ensureState().currentVideo = label;
+  if (!isTty) console.log(`\n━━━ ${label} ━━━`);
+}
+
 export function setCurrentProject(label: string): void { ensureState().currentProject = label; }
+
 export function addCurrentLlm(label: string): void { ensureState().currentLlm.push(label); }
 export function removeCurrentLlm(label: string): void {
   const idx = ensureState().currentLlm.indexOf(label);
@@ -137,22 +164,21 @@ export function logLine(line: string): void {
   if (s.recentLines.length > MAX_RECENT) {
     s.recentLines.shift();
   }
+  if (!isTty) console.log(`  ${line}`);
 }
 
-// ── Render ──────────────────────────────────────────────────
+// ── Render (TUI only) ───────────────────────────────────────
 
 function repaint(): void {
-  if (!dashState) return;
+  if (!dashState || !isTty) return;
   const s = dashState;
 
-  // Clear and start from top-left
   out(CLEAR_SCREEN + HOME);
 
   const w = (s: string) => out(s + '\n');
 
   w(`${BOLD}${CYAN}GitHubAwesome Monitor${RESET}\n`);
 
-  // Progress
   w(`${BOLD}Progress${RESET}`);
   w(`  Videos    ${progressBar(s.videosDone, s.videosTotal)}`);
   w(`  Projects  ${progressBar(s.projectsDone, s.projectsTotal)}`);
@@ -160,7 +186,6 @@ function repaint(): void {
   w(`  Reports   ${progressBar(s.reportsWritten, s.projectsTotal)}`);
   w('');
 
-  // Concurrency
   w(`${BOLD}Concurrency${RESET}`);
   w(`  VIDEO   ${concurrencyIndicator(s.videoLimiter.activeCount, s.videoLimiter.concurrency)}`);
   w(`  PROJECT ${concurrencyIndicator(s.projectLimiter.activeCount, s.projectLimiter.concurrency)}`);
@@ -168,7 +193,6 @@ function repaint(): void {
   w(`  GH API  ${concurrencyIndicator(s.githubLimiter.activeCount, s.githubLimiter.concurrency)}`);
   w('');
 
-  // Queues
   w(`${BOLD}Queues${RESET}`);
   w(
     `  videos: ${YELLOW}${s.videoLimiter.pendingCount}${RESET}   ` +
@@ -178,14 +202,12 @@ function repaint(): void {
   );
   w('');
 
-  // Current
   w(`${BOLD}Current${RESET}`);
   w(`  VIDEO    ${s.currentVideo || DIM + '—' + RESET}`);
   w(`  PROJECT  ${s.currentProject || DIM + '—' + RESET}`);
   w(`  LLM      ${s.currentLlm.length > 0 ? s.currentLlm.join(', ') : DIM + '—' + RESET}`);
   w('');
 
-  // Recent
   w(`${BOLD}Recent${RESET}`);
   if (s.recentLines.length === 0) {
     w(`  ${DIM}waiting...${RESET}`);

@@ -120,10 +120,9 @@ export async function getPinnedComment(
       const topComment = comments.contents[0];
       return topComment.comment?.content?.toString() || null;
     }
-  } catch (err) {
-    console.warn(
-      `  Could not fetch comments for video ${videoId}: ${err instanceof Error ? err.message : err}`,
-    );
+  } catch {
+    // youtubei.js parser can throw on unexpected response shapes
+    // (e.g. CommentFilterContextView not found). Just skip.
   }
   return null;
 }
