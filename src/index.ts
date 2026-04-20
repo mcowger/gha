@@ -302,6 +302,20 @@ async function daemon(): Promise<void> {
 
   console.log(`🕐 Daemon mode — schedule: ${CRON_SCHEDULE}\n`);
 
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let running = true;
+
+  const cleanup = (): void => {
+    if (!running) return;
+    running = false;
+    if (timer) clearTimeout(timer);
+    console.log('\n🛑 Shutting down...');
+    process.exit(0);
+  };
+
+  process.on('SIGTERM', cleanup);
+  process.on('SIGINT', cleanup);
+
   // Run immediately on startup
   try {
     await runOnce();
@@ -309,13 +323,17 @@ async function daemon(): Promise<void> {
     console.error(`Run failed: ${err instanceof Error ? err.message : err}`);
   }
 
+  if (!running) return;
+
   // Schedule subsequent runs
   const scheduleNext = (): void => {
+    if (!running) return;
     const delay = getNextCronDelay(CRON_SCHEDULE);
     const next = new Date(Date.now() + delay);
     console.log(`\n⏰ Next run at ${next.toISOString()} (in ${Math.round(delay / 60000)} min)\n`);
 
-    setTimeout(async () => {
+    timer = setTimeout(async () => {
+      if (!running) return;
       try {
         await runOnce();
       } catch (err) {
