@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { execSync } from 'node:child_process';
 import pLimit from 'p-limit';
 
 import { loadState, saveState, isReviewed } from './state.js';
@@ -23,6 +24,7 @@ const STATE_FILE = process.env.STATE_FILE || './state/reviewed.json';
 const VIDEO_CONCURRENCY = parseInt(process.env.VIDEO_CONCURRENCY || '3', 10);
 const PROJECT_CONCURRENCY = parseInt(process.env.PROJECT_CONCURRENCY || '5', 10);
 const LLM_CONCURRENCY = parseInt(process.env.LLM_CONCURRENCY || '3', 10);
+const CRON_SCHEDULE = process.env.CRON_SCHEDULE || '';  // e.g. "0 */6 * * *"
 
 function validateEnv(): void {
   const required = ['LLM_API_KEY'];
@@ -39,16 +41,32 @@ const videoLimit = pLimit({ concurrency: VIDEO_CONCURRENCY });
 const projectLimit = pLimit({ concurrency: PROJECT_CONCURRENCY });
 const llmLimit = pLimit({ concurrency: LLM_CONCURRENCY });
 
-/**
- * Process a single GitHub project: fetch details from GitHub API,
- * then summarize the README via LLM.
- */
+// ── Git helpers ─────────────────────────────────────────────
+
+function gitCommitAndPush(message: string): void {
+  try {
+    execSync('git add output/ state/', { stdio: 'pipe' });
+    // Only commit if there are changes
+    const status = execSync('git status --porcelain output/ state/', { encoding: 'utf-8' }).trim();
+    if (!status) {
+      console.log('  📭 No changes to commit');
+      return;
+    }
+    execSync(`git commit -m "${message}"`, { stdio: 'pipe' });
+    execSync('git push', { stdio: 'pipe' });
+    console.log(`  📤 Pushed: ${message}`);
+  } catch (err) {
+    console.error(`  ❌ Git push failed: ${err instanceof Error ? err.message : err}`);
+  }
+}
+
+// ── Core pipeline ───────────────────────────────────────────
+
 async function processProject(p: GitHubProject): Promise<GitHubProject> {
   const label = `${p.owner}/${p.repo}`;
 
   setCurrentProject(label);
 
-  // Fetch README + repo metadata (rate-limited by github.ts internal limiter)
   const detailed = await fetchProjectDetails(p);
 
   if (!detailed.readme) {
@@ -56,7 +74,6 @@ async function processProject(p: GitHubProject): Promise<GitHubProject> {
     detailed.error = 'No README found';
   } else {
     logLine(`📖 README fetched for ${label} (${detailed.readme.length} chars)`);
-    // Summarize (rate-limited independently)
     addCurrentLlm(label);
     const summary = await llmLimit(() => summarizeReadme(detailed.readme!, p.owner, p.repo));
     removeCurrentLlm(label);
@@ -74,18 +91,11 @@ async function processProject(p: GitHubProject): Promise<GitHubProject> {
   return detailed;
 }
 
-/**
- * Result of processing a single video.
- */
 interface VideoResult {
   reviewed: ReviewedVideo;
   report: VideoReport | null;
 }
 
-/**
- * Process a single video with a pre-fetched description.
- * Used when we pre-flight descriptions to count projects before starting.
- */
 async function processVideoWithDescription(
   video: { id: string; title: string; publishedText?: string; thumbnails: { url: string }[] },
   description: string,
@@ -93,10 +103,8 @@ async function processVideoWithDescription(
 ): Promise<VideoResult> {
   setCurrentVideo(video.title);
 
-  // Parse GitHub URLs from description
   let projects = parseGitHubUrls(description);
 
-  // Fallback: check pinned comment if no projects found in description
   if (projects.length === 0) {
     logLine(`No GitHub links in description for ${video.title}, checking pinned comment...`);
     const comment = await getPinnedComment(video.id);
@@ -120,12 +128,10 @@ async function processVideoWithDescription(
     };
   }
 
-  // Fetch GitHub details & summarize each project in parallel
   const enrichedProjects = await Promise.all(
     projects.map((p) => projectLimit(() => processProject(p))),
   );
 
-  // Build report
   const report: VideoReport = {
     videoId: video.id,
     title: video.title,
@@ -135,12 +141,10 @@ async function processVideoWithDescription(
     projects: enrichedProjects,
   };
 
-  // Write intermediate JSON data file
   const jsonPath = writeReportJson(report, OUTPUT_DIR);
   logLine(`💾 JSON → ${jsonPath}`);
   incReportsWritten();
 
-  // Persist state
   state.videos.push({
     videoId: video.id,
     title: video.title,
@@ -154,14 +158,13 @@ async function processVideoWithDescription(
   return { reviewed: state.videos[state.videos.length - 1], report };
 }
 
-// ── Fetch command ───────────────────────────────────────────
+// ── Commands ────────────────────────────────────────────────
+
 async function fetch(): Promise<void> {
   validateEnv();
 
-  // 1. Load state
   const state = loadState(STATE_FILE);
 
-  // 2. Fetch channel videos
   let videos;
   try {
     videos = await getChannelVideos(CHANNEL_ID, 10);
@@ -170,16 +173,14 @@ async function fetch(): Promise<void> {
     process.exit(1);
   }
 
-  // 3. Filter out already-reviewed videos
   const newVideos = videos.filter((v) => !isReviewed(state, v.id));
   if (newVideos.length === 0) {
     console.log('✅ No new videos since last run. Exiting.');
     return;
   }
 
-  // 4. Pre-fetch descriptions to discover total project count for progress bars
+  // Pre-fetch descriptions to discover total project count
   const videoDescriptions = new Map<string, string>();
-  const videoProjectCounts = new Map<string, number>();
   let totalProjects = 0;
 
   for (const video of newVideos) {
@@ -187,7 +188,6 @@ async function fetch(): Promise<void> {
       const desc = await getVideoDescription(video.id);
       if (!desc) {
         console.log(`  ⚠️  Empty description for ${video.title}`);
-        videoProjectCounts.set(video.id, 0);
         continue;
       }
       videoDescriptions.set(video.id, desc);
@@ -196,12 +196,10 @@ async function fetch(): Promise<void> {
         const comment = await getPinnedComment(video.id);
         if (comment) projects = parseGitHubUrlsFromComment(comment);
       }
-      videoProjectCounts.set(video.id, projects.length);
       totalProjects += projects.length;
       console.log(`  📋 ${video.title}: ${projects.length} projects`);
     } catch (err) {
       console.log(`  ❌ Pre-flight failed for ${video.title}: ${err instanceof Error ? err.message : err}`);
-      videoProjectCounts.set(video.id, 0);
     }
   }
 
@@ -209,7 +207,6 @@ async function fetch(): Promise<void> {
   setVideoTotal(newVideos.length);
   setProjectTotal(totalProjects);
 
-  // 5. Process all new videos in parallel
   const results = await Promise.all(
     newVideos.map((video) => {
       const description = videoDescriptions.get(video.id) || '';
@@ -223,7 +220,6 @@ async function fetch(): Promise<void> {
   console.log(`\n✨ Fetch complete! ${results.length} videos, ${projectCount} projects processed`);
 }
 
-// ── Render command ──────────────────────────────────────────
 async function render(): Promise<void> {
   console.log('🎨 GithubAwesome Monitor — render\n');
 
@@ -233,6 +229,105 @@ async function render(): Promise<void> {
   console.log('\n✨ Render complete!');
 }
 
+/**
+ * Run fetch + render + git push. Used by both the 'run' command and the daemon.
+ */
+async function runOnce(): Promise<void> {
+  console.log(`\n${'═'.repeat(50)}`);
+  console.log(`  GithubAwesome Monitor — ${new Date().toISOString()}`);
+  console.log(`${'═'.repeat(50)}\n`);
+
+  await fetch();
+  console.log();
+  await render();
+
+  // Commit and push output
+  const dateStr = new Date().toISOString().slice(0, 10);
+  gitCommitAndPush(`📡 update reports ${dateStr}`);
+}
+
+/**
+ * Parse a cron expression (e.g. "0 *\/6 * * *") and return ms until next run.
+ * Supports: minute, hour, dayOfMonth, month, dayOfWeek.
+ * Handles: wildcard, step (every N), and specific values.
+ */
+function getNextCronDelay(expression: string): number {
+  const parts = expression.trim().split(/\s+/);
+  if (parts.length !== 5) throw new Error(`Invalid cron: ${expression}`);
+
+  const [minuteField, hourField, , ,] = parts;
+
+  const parseField = (field: string, min: number, max: number): number[] => {
+    if (field === '*') return Array.from({ length: max - min + 1 }, (_, i) => min + i);
+    if (field.startsWith('*/')) {
+      const step = parseInt(field.slice(2), 10);
+      return Array.from({ length: Math.floor((max - min) / step) + 1 }, (_, i) => min + i * step);
+    }
+    return field.split(',').map(Number);
+  };
+
+  const minutes = parseField(minuteField, 0, 59);
+  const hours = parseField(hourField, 0, 23);
+
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+  // Find next occurrence (check next 48 hours)
+  for (let offset = 0; offset < 48; offset++) {
+    const day = new Date(startOfToday);
+    day.setDate(day.getDate() + offset);
+
+    for (const h of hours) {
+      for (const m of minutes) {
+        const candidate = new Date(day.getFullYear(), day.getMonth(), day.getDate(), h, m, 0);
+        if (candidate.getTime() > now.getTime()) {
+          return candidate.getTime() - now.getTime();
+        }
+      }
+    }
+  }
+
+  // Fallback: 6 hours
+  return 6 * 60 * 60 * 1000;
+}
+
+/**
+ * Daemon mode: runs on a cron schedule, fetches + renders + pushes each cycle.
+ */
+async function daemon(): Promise<void> {
+  if (!CRON_SCHEDULE) {
+    console.error('CRON_SCHEDULE is required for daemon mode. e.g. "0 */6 * * *"');
+    process.exit(1);
+  }
+
+  console.log(`🕐 Daemon mode — schedule: ${CRON_SCHEDULE}\n`);
+
+  // Run immediately on startup
+  try {
+    await runOnce();
+  } catch (err) {
+    console.error(`Run failed: ${err instanceof Error ? err.message : err}`);
+  }
+
+  // Schedule subsequent runs
+  const scheduleNext = (): void => {
+    const delay = getNextCronDelay(CRON_SCHEDULE);
+    const next = new Date(Date.now() + delay);
+    console.log(`\n⏰ Next run at ${next.toISOString()} (in ${Math.round(delay / 60000)} min)\n`);
+
+    setTimeout(async () => {
+      try {
+        await runOnce();
+      } catch (err) {
+        console.error(`Run failed: ${err instanceof Error ? err.message : err}`);
+      }
+      scheduleNext();
+    }, delay);
+  };
+
+  scheduleNext();
+}
+
 // ── CLI ─────────────────────────────────────────────────────
 function printUsage(): void {
   console.log(`Usage: bun run src/index.ts <command>
@@ -240,9 +335,12 @@ function printUsage(): void {
 Commands:
   fetch    Fetch new videos and gather data (writes JSON to output dir)
   render   Render JSON data files to HTML
-  (none)   Run both fetch and render
+  run      Fetch + render + git push (one-shot)
+  daemon   Run on a CRON_SCHEDULE, fetch + render + push each cycle
+  (none)   Same as 'run'
 
 Environment variables:
+  CRON_SCHEDULE        Cron expression for daemon mode (e.g. "0 */6 * * *")
   VIDEO_CONCURRENCY    Max parallel videos (default: 3)
   PROJECT_CONCURRENCY  Max parallel project fetches (default: 5)
   LLM_CONCURRENCY      Max parallel LLM calls (default: 3)`);
@@ -258,10 +356,14 @@ async function main(): Promise<void> {
     case 'render':
       await render();
       break;
+    case 'run':
+      await runOnce();
+      break;
+    case 'daemon':
+      await daemon();
+      break;
     case undefined:
-      await fetch();
-      console.log();
-      await render();
+      await runOnce();
       break;
     case '--help':
     case '-h':

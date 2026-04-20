@@ -8,9 +8,18 @@ This is a Bun/TypeScript CLI tool that monitors the GithubAwesome YouTube channe
 
 ```bash
 bun install
-bun run start          # fetch + render (default)
+bun run start          # fetch + render + git push (one-shot)
 bun run start fetch    # fetch only (API + LLM)
 bun run start render   # render existing JSON → HTML
+bun run start daemon   # run on CRON_SCHEDULE, fetch + render + push each cycle
+```
+
+Or via Docker:
+
+```bash
+docker build -t gha .
+docker run --rm -v $PWD/state:/app/state --env-file .env gha          # one-shot
+docker run -d --name gha -v $PWD/state:/app/state --env-file .env gha daemon  # daemon
 ```
 
 Requires a `.env` file — copy from `.env.example` and fill in credentials. The only strictly required variable is `LLM_API_KEY`. A `GH_TOKEN` is strongly recommended (60 vs 5,000 requests/hour).

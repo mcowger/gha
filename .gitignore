@@ -1,8 +1,8 @@
 # Output — we commit these for GitHub Pages
 # output/
 
-# State
-state/reviewed.json
+# State — not committed, local only
+state/
 
 # Dependencies
 node_modules/
