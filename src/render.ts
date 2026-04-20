@@ -89,7 +89,8 @@ export function renderAllJson(outputDir: string): string[] {
 
   const jsonFiles = readdirSync(outputDir)
     .filter((f) => f.startsWith('ghawesome-') && f.endsWith('.json'))
-    .sort();
+    .sort()
+    .reverse();
 
   if (jsonFiles.length === 0) {
     console.log('No JSON data files found to render.');
