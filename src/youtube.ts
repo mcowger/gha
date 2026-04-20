@@ -101,37 +101,10 @@ export async function getChannelVideos(
  * Falls back to checking the pinned comment if the description has no GitHub links.
  */
 export async function getVideoDescription(videoId: string): Promise<string> {
-  // Try multiple InnerTube clients — some clients/regions return empty descriptions.
-  const clients: Array<undefined | 'WEB_EMBEDDED' | 'ANDROID' | 'MWEB'> = [undefined, 'WEB_EMBEDDED', 'ANDROID', 'MWEB'];
-
-  for (const client of clients) {
-    try {
-      const yt = await getYT();
-      const info = await yt.getBasicInfo(videoId, client ? { client } : undefined);
-      const description = info.basic_info.short_description || '';
-      if (description) return description;
-    } catch {
-      // Some clients throw for certain videos, just try the next one
-    }
-  }
-
-  // Fallback: scrape the description from the YouTube watch page HTML.
-  // This works when InnerTube returns empty descriptions (e.g., on CI runners).
-  try {
-    const resp = await fetch(`https://www.youtube.com/watch?v=${videoId}`);
-    const html = await resp.text();
-    // YouTube embeds the description in a JSON blob inside a <script> tag
-    const match = html.match(/"shortDescription":"((?:[^"\\]|\\.)*)"/);
-    if (match) {
-      // Unescape JSON string
-      const desc = JSON.parse(`"${match[1]}"`);
-      if (desc) return desc;
-    }
-  } catch {
-    // Scraping failed too
-  }
-
-  return '';
+  const yt = await getYT();
+  const info = await yt.getBasicInfo(videoId);
+  const description = info.basic_info.short_description || '';
+  return description;
 }
 
 /**
