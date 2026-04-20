@@ -45,9 +45,9 @@ const llmLimit = pLimit({ concurrency: LLM_CONCURRENCY });
 
 function gitCommitAndPush(message: string): void {
   try {
-    execSync('git add output/ state/', { stdio: 'pipe' });
+    execSync('git add output/', { stdio: 'pipe' });
     // Only commit if there are changes
-    const status = execSync('git status --porcelain output/ state/', { encoding: 'utf-8' }).trim();
+    const status = execSync('git status --porcelain output/', { encoding: 'utf-8' }).trim();
     if (!status) {
       console.log('  📭 No changes to commit');
       return;
