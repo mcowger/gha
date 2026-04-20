@@ -1,18 +1,12 @@
-FROM --platform=linux/amd64 oven/bun:1
-
+FROM --platform=$BUILDPLATFORM oven/bun:1 AS build
 WORKDIR /app
-
-# Install git for push
-RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
-
-# Copy dependency files first for layer caching
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile
-
-# Copy source
 COPY . .
 
-# Default: run once and exit. Override with "daemon" for cron mode.
-# In daemon mode, set CRON_SCHEDULE env var (e.g. "0 */6 * * *")
+FROM --platform=$TARGETPLATFORM oven/bun:1
+WORKDIR /app
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+COPY --from=build /app /app
 ENTRYPOINT ["bun", "run", "src/index.ts"]
 CMD []
