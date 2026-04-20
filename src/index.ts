@@ -1,6 +1,8 @@
 import 'dotenv/config';
-import { execSync } from 'node:child_process';
 import pLimit from 'p-limit';
+import git from 'isomorphic-git';
+import fs from 'node:fs';
+import path from 'node:path';
 
 import { loadState, saveState, isReviewed } from './state.js';
 import { getChannelVideos, getVideoDescription, getPinnedComment } from './youtube.js';
@@ -43,17 +45,44 @@ const llmLimit = pLimit({ concurrency: LLM_CONCURRENCY });
 
 // ── Git helpers ─────────────────────────────────────────────
 
-function gitCommitAndPush(message: string): void {
+async function gitCommitAndPush(message: string): Promise<void> {
   try {
-    execSync('git add output/', { stdio: 'pipe' });
-    // Only commit if there are changes
-    const status = execSync('git status --porcelain output/', { encoding: 'utf-8' }).trim();
-    if (!status) {
+    const dir = process.cwd();
+
+    // Stage output files
+    const pattern = 'output/';
+    const matrix = await git.statusMatrix({ fs, dir, filter: (f: string) => f.startsWith(pattern) });
+
+    const changes = matrix.filter((row: Array<string | number>) => row[1] !== row[2]); // working tree differs from index
+    if (changes.length === 0) {
       console.log('  📭 No changes to commit');
       return;
     }
-    execSync(`git commit -m "${message}"`, { stdio: 'pipe' });
-    execSync('git push', { stdio: 'pipe' });
+
+    // Stage all changed output files
+    for (const [filepath] of changes) {
+      await git.add({ fs, dir, filepath });
+    }
+
+    // Commit
+    await git.commit({ fs, dir, message, author: { name: 'gha-bot', email: 'bot@gha.local' } });
+
+    // Push
+    const remote = (await git.listRemotes({ fs, dir }))[0]?.remote || 'origin';
+    const branch = (await git.currentBranch({ fs, dir })) || 'main';
+    const token = process.env.GH_TOKEN;
+    const repoUrl = `https://mcowger:${token}@github.com/mcowger/gha.git`;
+
+    await git.push({
+      fs,
+      http: await import('isomorphic-git/http/node').then(m => m.default),
+      dir,
+      remote,
+      ref: branch,
+      url: repoUrl,
+      onAuth: () => ({ username: 'mcowger', password: token }),
+    });
+
     console.log(`  📤 Pushed: ${message}`);
   } catch (err) {
     console.error(`  ❌ Git push failed: ${err instanceof Error ? err.message : err}`);
@@ -243,7 +272,7 @@ async function runOnce(): Promise<void> {
 
   // Commit and push output
   const dateStr = new Date().toISOString().slice(0, 10);
-  gitCommitAndPush(`📡 update reports ${dateStr}`);
+  await gitCommitAndPush(`📡 update reports ${dateStr}`);
 }
 
 /**
