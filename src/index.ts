@@ -68,10 +68,14 @@ async function gitInitOrPull(): Promise<void> {
     try {
       const branch = (await git.currentBranch({ fs, dir })) || 'main';
       const remote = (await git.listRemotes({ fs, dir }))[0]?.remote || 'origin';
-      await git.pull({ fs, http, dir, remote, ref: branch, url, onAuth: () => auth, singleBranch: true });
+      await git.pull({
+        fs, http, dir, remote, ref: branch, url, onAuth: () => auth, singleBranch: true,
+        author: { name: 'gha-bot', email: 'bot@gha.local' },
+        committer: { name: 'gha-bot', email: 'bot@gha.local' },
+      });
       console.log('  ✅ Repo pulled');
-    } catch {
-      console.log('  ⚠️  Pull failed (may be ahead of remote)');
+    } catch (err) {
+      console.log(`  ⚠️  Pull failed: ${err instanceof Error ? err.message : err}`);
     }
   }
 
