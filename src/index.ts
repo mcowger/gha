@@ -68,6 +68,12 @@ async function gitInitOrPull(): Promise<void> {
     try {
       const branch = (await git.currentBranch({ fs, dir })) || 'main';
       const remote = (await git.listRemotes({ fs, dir }))[0]?.remote || 'origin';
+
+      // 1. Discard local modifications to tracked files before pulling
+      try {
+        await git.checkout({ fs, dir, force: true, ref: branch });
+      } catch { /* ok */ }
+
       await git.pull({
         fs, http, dir, remote, ref: branch, url, onAuth: () => auth, singleBranch: true,
         author: { name: 'gha-bot', email: 'bot@gha.local' },
@@ -76,6 +82,20 @@ async function gitInitOrPull(): Promise<void> {
       console.log('  ✅ Repo pulled');
     } catch (err) {
       console.log(`  ⚠️  Pull failed: ${err instanceof Error ? err.message : err}`);
+
+      // 2. If pull/merge fails (due to conflicts or dirty index), force reset to remote origin branch
+      try {
+        const branch = (await git.currentBranch({ fs, dir })) || 'main';
+        const remote = (await git.listRemotes({ fs, dir }))[0]?.remote || 'origin';
+        console.log(`  🔄 Attempting force reset to override local conflicts...`);
+
+        await git.fetch({ fs, http, dir, remote, ref: branch, url, onAuth: () => auth, singleBranch: true });
+        await git.checkout({ fs, dir, force: true, ref: `refs/remotes/${remote}/${branch}` });
+
+        console.log('  ✅ Force synced with remote successfully');
+      } catch (forceErr) {
+        console.log(`  ❌ Force reset failed: ${forceErr instanceof Error ? forceErr.message : forceErr}`);
+      }
     }
   }
 
