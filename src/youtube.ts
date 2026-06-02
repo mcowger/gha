@@ -146,6 +146,78 @@ export async function getPinnedComment(
 }
 
 /**
+ * Fetch recent videos from a YouTube playlist, returning them newest-first.
+ *
+ * Playlists are delivered oldest-first by the InnerTube API, so we paginate
+ * through all continuation pages to collect every video, then reverse to get
+ * the newest entries first.  Only the last `maxVideos` (after reversing) are
+ * returned, which avoids processing hundreds of historical entries on the first
+ * run (the caller's state file handles skipping already-reviewed ones).
+ */
+export async function getPlaylistVideos(
+  playlistId: string,
+  maxVideos: number = 10,
+): Promise<ChannelVideo[]> {
+  const yt = await getYT();
+
+  // Collect all video nodes across all pages
+  const allNodes: any[] = [];
+  let page = await yt.getPlaylist(playlistId);
+  for (const v of page.videos ?? []) allNodes.push(v);
+
+  while (page.has_continuation) {
+    page = await page.getContinuation();
+    for (const v of page.videos ?? []) allNodes.push(v);
+  }
+
+  // Reverse so index 0 is the newest video
+  allNodes.reverse();
+
+  const videos: ChannelVideo[] = [];
+
+  for (const video of allNodes) {
+    if (videos.length >= maxVideos) break;
+
+    // PlaylistVideo nodes expose id, title, duration, thumbnails directly
+    const id: string | undefined = video.id ?? video.video_id;
+    if (!id) continue;
+
+    const title: string =
+      typeof video.title === 'string'
+        ? video.title
+        : video.title?.toString?.() ?? 'Untitled';
+
+    const dur = video.duration;
+    const durationSeconds: number | undefined =
+      typeof dur === 'number' ? dur : dur?.seconds;
+
+    // Skip Shorts (≤ 60 s)
+    if (durationSeconds !== undefined && durationSeconds <= 60) continue;
+
+    const thumbnails: { url: string; width: number; height: number }[] =
+      Array.isArray(video.thumbnails)
+        ? video.thumbnails.map((t: any) => ({
+            url: t.url,
+            width: t.width ?? 0,
+            height: t.height ?? 0,
+          }))
+        : [];
+
+    videos.push({
+      id,
+      title,
+      durationSeconds,
+      publishedText: undefined, // not available on PlaylistVideo nodes
+      uploadDate: null,         // fetched separately via getVideoUploadDate
+      thumbnails,
+      isShort: false,
+    });
+  }
+
+  return videos;
+}
+
+/**
  * Resolve a YouTube handle (e.g., @GithubAwesome) to a channel ID.
  */
 export async function resolveChannelId(handle: string): Promise<string> {

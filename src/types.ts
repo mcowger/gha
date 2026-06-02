@@ -22,6 +22,12 @@ export interface GitHubProject {
   error?: string;
 }
 
+export interface VideoSource {
+  label: string;
+  type: 'channel' | 'playlist';
+  id: string;
+}
+
 export interface VideoReport {
   videoId: string;
   title: string;
@@ -30,4 +36,5 @@ export interface VideoReport {
   thumbnailUrl: string;
   videoUrl: string;
   projects: GitHubProject[];
+  source?: VideoSource;
 }

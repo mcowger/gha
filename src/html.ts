@@ -57,14 +57,16 @@ function formatStars(stars: number | null): string {
 /**
  * Generate an index page that lists all reports.
  */
-export function generateIndexHtml(reports: Array<{ filename: string; title: string; date: string; projectCount: number; videoUrl: string }>): string {
+export function generateIndexHtml(reports: Array<{ filename: string; title: string; date: string; projectCount: number; videoUrl: string; sourceLabel?: string }>): string {
   const items = reports.map(r => `
     <a class="report-card" href="${escapeHtml(r.filename)}">
       <div class="report-title">${escapeHtml(r.title)}</div>
       <div class="report-meta">
         <span>${escapeHtml(r.date)}</span>
         <span>·</span>
-        <span>${r.projectCount} projects</span>
+        <span>${r.projectCount} projects</span>${r.sourceLabel ? `
+        <span>·</span>
+        <span class="source-tag">${escapeHtml(r.sourceLabel)}</span>` : ''}
       </div>
     </a>`).join('\n');
 
@@ -99,6 +101,7 @@ export function generateIndexHtml(reports: Array<{ filename: string; title: stri
     .report-card:hover{background:#161b22}
     .report-title{color:#58a6ff;font-size:0.9rem;font-weight:600;margin-bottom:0.15rem}
     .report-meta{color:#8b949e;font-size:0.75rem;display:flex;gap:0.4rem;align-items:center}
+    .source-tag{background:#1f2937;color:#8b949e;font-size:0.7rem;padding:1px 6px;border-radius:9999px;border:1px solid #30363d}
     .footer{text-align:center;padding:1.5rem 1rem;color:#484f58;font-size:0.7rem;border-top:1px solid #21262d;margin-top:1rem}
   </style>
 </head>
@@ -131,6 +134,10 @@ export function generateHtml(report: VideoReport): string {
   const projectsJson = JSON.stringify(report.projects).replace(/<\/script/gi, '<\\/script');
   const colorsJson = JSON.stringify(LANG_COLORS);
 
+  const sourceTag = report.source
+    ? `<span>·</span><span class="source-tag">${escapeAttr(report.source.label)}</span>`
+    : '';
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -153,6 +160,7 @@ export function generateHtml(report: VideoReport): string {
     .header .meta a{color:#58a6ff;text-decoration:none}
     .header .meta a:hover{text-decoration:underline}
     .badge{background:#238636;color:#fff;font-size:0.7rem;padding:1px 8px;border-radius:9999px;font-weight:600}
+    .source-tag{background:#1f2937;color:#8b949e;font-size:0.7rem;padding:1px 6px;border-radius:9999px;border:1px solid #30363d}
     .list{max-width:640px;margin:0 auto;padding:0.5rem 0}
     .project{
       padding:0.75rem 1rem;
@@ -187,6 +195,7 @@ export function generateHtml(report: VideoReport): string {
     <span>·</span>
     <a href="${report.videoUrl}" target="_blank" rel="noopener">▶ Watch on YouTube</a>
     <span class="badge">${report.projects.length}</span>
+    ${sourceTag}
   </div>
 </div>
 

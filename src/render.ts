@@ -28,7 +28,7 @@ export function writeReportJson(
 function generateIndex(outputDir: string, htmlFiles: string[]): string | null {
   if (htmlFiles.length === 0) return null;
 
-  const reports: Array<{ filename: string; title: string; date: string; projectCount: number; videoUrl: string; sortKey: string }> = [];
+  const reports: Array<{ filename: string; title: string; date: string; projectCount: number; videoUrl: string; sourceLabel?: string; sortKey: string }> = [];
 
   for (const htmlPath of htmlFiles) {
     const jsonName = basename(htmlPath, '.html') + '.json';
@@ -54,6 +54,7 @@ function generateIndex(outputDir: string, htmlFiles: string[]): string | null {
         date: displayDate,
         projectCount: report.projects.length,
         videoUrl: report.videoUrl,
+        sourceLabel: report.source?.label,
         sortKey,
       });
     } catch {

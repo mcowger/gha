@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { loadState, saveState, isReviewed } from './state.js';
-import { getChannelVideos, getVideoDescription, getVideoUploadDate, getPinnedComment } from './youtube.js';
+import { getChannelVideos, getPlaylistVideos, getVideoDescription, getVideoUploadDate, getPinnedComment } from './youtube.js';
 import { parseGitHubUrls, parseGitHubUrlsFromComment } from './parser.js';
 import { fetchProjectDetails, githubLimit } from './github.js';
 import { summarizeReadme } from './llm.js';
@@ -17,10 +17,10 @@ import {
   setCurrentVideo, setCurrentProject, addCurrentLlm, removeCurrentLlm,
   logLine,
 } from './dashboard.js';
-import type { VideoReport, GitHubProject, ReviewedVideo } from './types.js';
+import type { VideoReport, VideoSource, GitHubProject, ReviewedVideo } from './types.js';
+import { SOURCES } from './sources.js';
 
 // ── Configuration ──────────────────────────────────────────
-const CHANNEL_ID = process.env.YOUTUBE_CHANNEL_ID || 'UC9Rrud-8CaHokDtK9FszvRg';
 const OUTPUT_DIR = process.env.OUTPUT_DIR || './output';
 const STATE_FILE = process.env.STATE_FILE || './state/reviewed.json';
 const VIDEO_CONCURRENCY = parseInt(process.env.VIDEO_CONCURRENCY || '3', 10);
@@ -214,6 +214,7 @@ async function processVideoWithDescription(
   video: { id: string; title: string; publishedText?: string; uploadDate?: string | null; thumbnails: { url: string }[] },
   description: string,
   state: { videos: ReviewedVideo[] },
+  source?: VideoSource,
 ): Promise<VideoResult> {
   setCurrentVideo(video.title);
 
@@ -254,6 +255,7 @@ async function processVideoWithDescription(
     thumbnailUrl: video.thumbnails[0]?.url || '',
     videoUrl: `https://www.youtube.com/watch?v=${video.id}`,
     projects: enrichedProjects,
+    ...(source ? { source } : {}),
   };
 
   const jsonPath = writeReportJson(report, OUTPUT_DIR);
@@ -280,16 +282,39 @@ async function fetch(): Promise<void> {
 
   const state = loadState(STATE_FILE);
 
-  let videos;
-  try {
-    videos = await getChannelVideos(CHANNEL_ID, 10);
-  } catch (err) {
-    console.error(`❌ Failed to fetch channel videos: ${err instanceof Error ? err.message : err}`);
+  // ── Collect tagged videos from all sources ──────────────
+  const taggedVideos: Array<{ video: Awaited<ReturnType<typeof getChannelVideos>>[number]; source: VideoSource }> = [];
+
+  for (const { source, maxVideos = 10 } of SOURCES) {
+    try {
+      let videos: Awaited<ReturnType<typeof getChannelVideos>>;
+      if (source.type === 'channel') {
+        videos = await getChannelVideos(source.id, maxVideos);
+      } else {
+        videos = await getPlaylistVideos(source.id, maxVideos);
+      }
+      for (const v of videos) taggedVideos.push({ video: v, source });
+      console.log(`  ${source.type === 'channel' ? '📺' : '📋'} ${source.label} (${source.type}): ${videos.length} videos fetched`);
+    } catch (err) {
+      console.error(`❌ Failed to fetch ${source.label}: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  if (taggedVideos.length === 0) {
+    console.error('❌ No videos fetched from any source. Exiting.');
     process.exit(1);
   }
 
-  const newVideos = videos.filter((v) => !isReviewed(state, v.id));
-  if (newVideos.length === 0) {
+  // Deduplicate by video ID (keep first occurrence, which preserves source tag)
+  const seenIds = new Set<string>();
+  const dedupedTagged = taggedVideos.filter(({ video }) => {
+    if (seenIds.has(video.id)) return false;
+    seenIds.add(video.id);
+    return true;
+  });
+
+  const newTagged = dedupedTagged.filter(({ video }) => !isReviewed(state, video.id));
+  if (newTagged.length === 0) {
     console.log('✅ No new videos since last run. Exiting.');
     return;
   }
@@ -298,7 +323,7 @@ async function fetch(): Promise<void> {
   const videoDescriptions = new Map<string, string>();
   let totalProjects = 0;
 
-  for (const video of newVideos) {
+  for (const { video } of newTagged) {
     try {
       const desc = await getVideoDescription(video.id);
       if (!desc) {
@@ -323,13 +348,13 @@ async function fetch(): Promise<void> {
   }
 
   initDashboard(videoLimit, projectLimit, llmLimit, githubLimit);
-  setVideoTotal(newVideos.length);
+  setVideoTotal(newTagged.length);
   setProjectTotal(totalProjects);
 
   const results = await Promise.all(
-    newVideos.map((video) => {
+    newTagged.map(({ video, source }) => {
       const description = videoDescriptions.get(video.id) || '';
-      return videoLimit(() => processVideoWithDescription(video, description, state));
+      return videoLimit(() => processVideoWithDescription(video, description, state, source));
     }),
   );
 
