@@ -1,0 +1,13 @@
+{
+  "worktree": {
+    "setup": [
+      "bun i"
+    ]
+  },
+  "scripts": {
+    "daemon": {
+      "type": "service",
+      "command": "bun run dev serve --port ${PASEO_PORT:-8080}"
+    }
+  }
+}
