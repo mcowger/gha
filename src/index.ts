@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import pLimit from 'p-limit';
 
-import { loadState, saveState, isReviewed } from './state.js';
+import { loadState, saveState, isReviewed, reconcileStateWithOutput } from './state.js';
 import { getChannelVideos, getPlaylistVideos, getVideoDescription, getVideoUploadDate, getPinnedComment } from './youtube.js';
 import { parseGitHubUrls, parseGitHubUrlsFromComment } from './parser.js';
 import { fetchProjectDetails } from './github.js';
@@ -167,7 +167,8 @@ async function fetchReports(): Promise<void> {
   validateEnv();
   writeLastChecked(OUTPUT_DIR);
 
-  const state = loadState(STATE_FILE);
+  const state = reconcileStateWithOutput(loadState(STATE_FILE), OUTPUT_DIR);
+  saveState(STATE_FILE, state);
 
   // ── Collect tagged videos from all sources ──────────────
   const taggedVideos: Array<{ video: Awaited<ReturnType<typeof getChannelVideos>>[number]; source: VideoSource }> = [];
