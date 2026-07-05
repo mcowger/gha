@@ -13,6 +13,10 @@ bun run start fetch    # fetch only (API + LLM)
 bun run start render   # render existing JSON → HTML
 bun run start run      # fetch + render once, no server
 bun run start serve    # serve the existing output/ dir only, no fetching
+bun run start --port 3000   # override PORT for this run
+
+bun run dev --port 8080         # like 'start', but restarts on source changes (bun --watch)
+bun run dev serve --port 8080   # e.g. iterate on server.ts/html.ts without needing API keys
 ```
 
 Or via Docker:

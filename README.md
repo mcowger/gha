@@ -65,9 +65,17 @@ bun run start fetch     # fetch only (API + LLM), writes JSON to output/
 bun run start render    # render existing JSON → HTML
 bun run start run       # fetch + render once, no server
 bun run start serve     # just serve the existing output/ dir, no fetching
+bun run start --port 3000       # override the PORT env var for this run
 ```
 
 Reports are available at `http://localhost:8080/` (or your configured `PORT`) once the server is running.
+
+### Development
+
+```bash
+bun run dev --port 8080         # same as 'start', but restarts on source changes (bun --watch)
+bun run dev serve --port 8080   # e.g. iterate on server.ts/html.ts without needing API keys
+```
 
 ## Output
 

@@ -3,6 +3,25 @@ import { join, basename } from 'node:path';
 import { generateHtml, generateIndexHtml } from './html.js';
 import type { VideoReport } from './types.js';
 
+const LAST_CHECKED_FILENAME = 'last-checked.json';
+
+/**
+ * Record the time the app last checked sources for new videos.
+ */
+export function writeLastChecked(outputDir: string, checkedAt: string = new Date().toISOString()): void {
+  mkdirSync(outputDir, { recursive: true });
+  writeFileSync(join(outputDir, LAST_CHECKED_FILENAME), JSON.stringify({ checkedAt }), 'utf-8');
+}
+
+function readLastChecked(outputDir: string): string | null {
+  try {
+    const raw = readFileSync(join(outputDir, LAST_CHECKED_FILENAME), 'utf-8');
+    return (JSON.parse(raw) as { checkedAt: string }).checkedAt;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Write a VideoReport to a JSON data file in the output directory.
  * Returns the path of the written file.
@@ -65,7 +84,7 @@ function generateIndex(outputDir: string, htmlFiles: string[]): string | null {
   // Sort newest first
   reports.sort((a, b) => b.sortKey.localeCompare(a.sortKey));
 
-  const html = generateIndexHtml(reports);
+  const html = generateIndexHtml(reports, readLastChecked(outputDir));
   const indexPath = join(outputDir, 'index.html');
   writeFileSync(indexPath, html, 'utf-8');
   return indexPath;

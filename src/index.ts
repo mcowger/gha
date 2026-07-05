@@ -6,8 +6,8 @@ import { getChannelVideos, getPlaylistVideos, getVideoDescription, getVideoUploa
 import { parseGitHubUrls, parseGitHubUrlsFromComment } from './parser.js';
 import { fetchProjectDetails } from './github.js';
 import { summarizeReadme } from './llm.js';
-import { writeReportJson } from './render.js';
-import { startServer } from './server.js';
+import { writeReportJson, writeLastChecked } from './render.js';
+import { startServer, type RefreshTrigger } from './server.js';
 import type { VideoReport, VideoSource, GitHubProject, ReviewedVideo } from './types.js';
 import { SOURCES } from './sources.js';
 
@@ -18,11 +18,51 @@ const VIDEO_CONCURRENCY = parseInt(process.env.VIDEO_CONCURRENCY || '3', 10);
 const PROJECT_CONCURRENCY = parseInt(process.env.PROJECT_CONCURRENCY || '5', 10);
 const LLM_CONCURRENCY = parseInt(process.env.LLM_CONCURRENCY || '3', 10);
 const CRON_SCHEDULE = process.env.CRON_SCHEDULE || '';  // e.g. "0 */6 * * *"
-const PORT = parseInt(process.env.PORT || '8080', 10);
 
+/**
+ * Parse CLI args into a command word and a --port option. The command may
+ * appear before or after --port (e.g. both "serve --port 8080" and
+ * "--port 8080" with no command, defaulting to daemon, are valid).
+ */
+function parseArgs(argv: string[]): { command?: string; port: number | null } {
+  let port: number | null = null;
+  const rest: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--port') {
+      port = parseInt(argv[++i], 10);
+    } else if (a.startsWith('--port=')) {
+      port = parseInt(a.slice('--port='.length), 10);
+    } else {
+      rest.push(a);
+    }
+  }
+  return { command: rest[0], port };
+}
+
+const { command: CLI_COMMAND, port: PORT_ARG } = parseArgs(process.argv.slice(2));
+const PORT = PORT_ARG ?? parseInt(process.env.PORT || '8080', 10);
+
+const REQUIRED_ENV_VARS = ['LLM_API_KEY', 'YOUTUBE_API_KEY'];
+
+/**
+ * Throws if required env vars are missing. Used inside the fetch pipeline so a
+ * refresh triggered from the running server (missing credentials) fails that one
+ * run instead of exiting the whole process.
+ */
 function validateEnv(): void {
-  const required = ['LLM_API_KEY', 'YOUTUBE_API_KEY'];
-  const missing = required.filter((k) => !process.env[k]);
+  const missing = REQUIRED_ENV_VARS.filter((k) => !process.env[k]);
+  if (missing.length > 0) {
+    throw new Error(`Missing required environment variables: ${missing.join(', ')}. Check .env.example for required configuration.`);
+  }
+}
+
+/**
+ * Fails fast with a clear message and exit code when a CLI command can never
+ * succeed without these vars (fetch/run/daemon).
+ */
+function validateEnvOrExit(): void {
+  const missing = REQUIRED_ENV_VARS.filter((k) => !process.env[k]);
   if (missing.length > 0) {
     console.error(`Missing required environment variables: ${missing.join(', ')}`);
     console.error('Check .env.example for required configuration.');
@@ -125,6 +165,7 @@ async function processVideoWithDescription(
 
 async function fetchReports(): Promise<void> {
   validateEnv();
+  writeLastChecked(OUTPUT_DIR);
 
   const state = loadState(STATE_FILE);
 
@@ -210,6 +251,31 @@ async function render(): Promise<void> {
   console.log('\n✨ Render complete!');
 }
 
+let isRunning = false;
+
+/**
+ * Run fetch + render while tracking `isRunning`, so overlapping triggers
+ * (scheduled cron run vs. manual refresh) can be detected and skipped.
+ */
+async function runOnceTracked(): Promise<void> {
+  isRunning = true;
+  try {
+    await runOnce();
+  } finally {
+    isRunning = false;
+  }
+}
+
+/**
+ * Kick off a run in the background if one isn't already in progress.
+ * Used by the "Refresh" button on the index page.
+ */
+function triggerRefresh(): 'started' | 'already_running' {
+  if (isRunning) return 'already_running';
+  runOnceTracked().catch((err) => console.error(`Run failed: ${err instanceof Error ? err.message : err}`));
+  return 'started';
+}
+
 /**
  * Run fetch + render. Used by both the 'run' command and each daemon cycle.
  */
@@ -278,8 +344,9 @@ async function daemon(): Promise<void> {
     console.error('CRON_SCHEDULE is required for daemon mode. e.g. "0 */6 * * *"');
     process.exit(1);
   }
+  validateEnvOrExit();
 
-  startServer(OUTPUT_DIR, PORT);
+  startServer(OUTPUT_DIR, PORT, triggerRefresh);
 
   console.log(`🕐 Daemon mode — schedule: ${CRON_SCHEDULE}\n`);
 
@@ -299,7 +366,7 @@ async function daemon(): Promise<void> {
 
   // Run immediately on startup
   try {
-    await runOnce();
+    await runOnceTracked();
   } catch (err) {
     console.error(`Run failed: ${err instanceof Error ? err.message : err}`);
   }
@@ -315,10 +382,14 @@ async function daemon(): Promise<void> {
 
     timer = setTimeout(async () => {
       if (!running) return;
-      try {
-        await runOnce();
-      } catch (err) {
-        console.error(`Run failed: ${err instanceof Error ? err.message : err}`);
+      if (isRunning) {
+        console.log('⏭  Skipping scheduled run — a refresh is already in progress');
+      } else {
+        try {
+          await runOnceTracked();
+        } catch (err) {
+          console.error(`Run failed: ${err instanceof Error ? err.message : err}`);
+        }
       }
       scheduleNext();
     }, delay);
@@ -339,6 +410,9 @@ Commands:
   daemon   Start the HTTP server and fetch + render on a CRON_SCHEDULE
   (none)   Same as 'daemon'
 
+Options:
+  --port <n>           Port for the built-in HTTP server (overrides PORT env var)
+
 Environment variables:
   PORT                 Port for the built-in HTTP server (default: 8080)
   CRON_SCHEDULE        Cron expression for daemon mode (e.g. "0 */6 * * *")
@@ -348,20 +422,22 @@ Environment variables:
 }
 
 async function main(): Promise<void> {
-  const command = process.argv[2];
+  const command = CLI_COMMAND;
 
   switch (command) {
     case 'fetch':
+      validateEnvOrExit();
       await fetchReports();
       break;
     case 'render':
       await render();
       break;
     case 'run':
+      validateEnvOrExit();
       await runOnce();
       break;
     case 'serve':
-      startServer(OUTPUT_DIR, PORT);
+      startServer(OUTPUT_DIR, PORT, triggerRefresh);
       break;
     case 'daemon':
     case undefined:
