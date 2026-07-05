@@ -1,4 +1,5 @@
-import { igniteModel, loadModels, Message } from 'multi-llm-ts';
+import { createModels, createProvider, type Model } from '@earendil-works/pi-ai';
+import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
 
 const SYSTEM_PROMPT = `You are a technical writer who summarizes open-source GitHub projects.
 Given a project's README content, write a concise summary in 3-4 sentences.
@@ -10,42 +11,55 @@ Be informative but brief. Do not use bullet points or headings — write prose.`
 
 const MAX_README_LENGTH = 4000;
 
-let _model: any = null;
+let _model: Model<'openai-completions'> | null = null;
+let _models: ReturnType<typeof createModels> | null = null;
 
-async function getModel() {
-  if (_model) return _model;
+function getModel(): { models: ReturnType<typeof createModels>; model: Model<'openai-completions'> } {
+  if (_model && _models) return { models: _models, model: _model };
 
-  const provider = process.env.LLM_PROVIDER || 'openai';
+  const providerId = process.env.LLM_PROVIDER || 'openai';
   const apiKey = process.env.LLM_API_KEY;
-  const baseURL = process.env.LLM_BASE_URL;
-  const modelName = process.env.LLM_MODEL;
+  const baseUrl = process.env.LLM_BASE_URL || 'https://api.openai.com/v1';
+  const modelName = process.env.LLM_MODEL || 'gpt-4o-mini';
 
   if (!apiKey) {
     throw new Error('LLM_API_KEY environment variable is required');
   }
 
-  const config: Record<string, any> = { apiKey };
-  if (baseURL) config.baseURL = baseURL;
+  const model: Model<'openai-completions'> = {
+    id: modelName,
+    name: modelName,
+    api: 'openai-completions',
+    provider: providerId,
+    baseUrl,
+    reasoning: false,
+    input: ['text'],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 128000,
+    maxTokens: 4096,
+  };
 
-  const models = await loadModels(provider, config);
+  const provider = createProvider({
+    id: providerId,
+    baseUrl,
+    auth: {
+      apiKey: {
+        name: 'LLM_API_KEY',
+        resolve: async () => ({ auth: { apiKey } }),
+      },
+    },
+    models: [model],
+    api: openAICompletionsApi(),
+  });
 
-  // If user specified a model name, try to find it in the list
-  let selectedModel: any;
-  if (modelName && models) {
-    selectedModel = models.chat.find(
-      (m: any) => m.id === modelName || m.name === modelName,
-    );
-  }
-  if (!selectedModel && models) {
-    selectedModel = models.chat[0];
-  }
+  const models = createModels();
+  models.setProvider(provider);
 
-  console.log(
-    `  LLM: Using provider "${provider}", model "${selectedModel.id || selectedModel.name}"`,
-  );
+  console.log(`  LLM: Using provider "${providerId}", model "${modelName}"`);
 
-  _model = igniteModel(provider, selectedModel, config);
-  return _model;
+  _models = models;
+  _model = model;
+  return { models, model };
 }
 
 /**
@@ -57,23 +71,22 @@ export async function summarizeReadme(
   repo: string,
 ): Promise<string | null> {
   try {
-    const model = await getModel();
+    const { models, model } = getModel();
 
     const truncated =
       readme.length > MAX_README_LENGTH
         ? readme.slice(0, MAX_README_LENGTH) + '\n\n[... README truncated ...]'
         : readme;
 
-    const messages = [
-      new Message('system', SYSTEM_PROMPT),
-      new Message(
-        'user',
-        `Project: ${owner}/${repo}\n\n${truncated}`,
-      ),
-    ];
+    const response = await models.complete(model, {
+      systemPrompt: SYSTEM_PROMPT,
+      messages: [
+        { role: 'user', content: `Project: ${owner}/${repo}\n\n${truncated}`, timestamp: Date.now() },
+      ],
+    });
 
-    const response = await model.complete(messages);
-    return response.content || null;
+    const text = response.content.find((b) => b.type === 'text')?.text;
+    return text || null;
   } catch (err) {
     console.warn(
       `  LLM summarization failed for ${owner}/${repo}: ${err instanceof Error ? err.message : err}`,

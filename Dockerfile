@@ -8,12 +8,17 @@ FROM --platform=$TARGETPLATFORM oven/bun:1
 WORKDIR /app
 COPY --from=build /app /app
 
-# /repo is where the git clone lives (output/ and state/ are inside it)
-VOLUME /repo
+# output/ (reports served over HTTP) and state/ (reviewed-video tracking)
+# persist across container restarts via these volumes. Named volumes are
+# seeded from the image's baked-in output/ directory on first creation.
+VOLUME /app/output
+VOLUME /app/state
 
-# State persists across runs inside the repo
-ENV STATE_FILE=/repo/state/reviewed.json
-ENV OUTPUT_DIR=/repo/output
+ENV STATE_FILE=/app/state/reviewed.json
+ENV OUTPUT_DIR=/app/output
+ENV PORT=8080
+
+EXPOSE 8080
 
 ENTRYPOINT ["bun", "run", "src/index.ts"]
 CMD []

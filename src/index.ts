@@ -1,22 +1,13 @@
 import 'dotenv/config';
 import pLimit from 'p-limit';
-import git from 'isomorphic-git';
-import fs from 'node:fs';
-import path from 'node:path';
 
 import { loadState, saveState, isReviewed } from './state.js';
 import { getChannelVideos, getPlaylistVideos, getVideoDescription, getVideoUploadDate, getPinnedComment } from './youtube.js';
 import { parseGitHubUrls, parseGitHubUrlsFromComment } from './parser.js';
-import { fetchProjectDetails, githubLimit } from './github.js';
+import { fetchProjectDetails } from './github.js';
 import { summarizeReadme } from './llm.js';
 import { writeReportJson } from './render.js';
-import {
-  initDashboard, stopDashboard,
-  setVideoTotal, setProjectTotal,
-  incVideosDone, incProjectsDone, incLlmDone, incReportsWritten,
-  setCurrentVideo, setCurrentProject, addCurrentLlm, removeCurrentLlm,
-  logLine,
-} from './dashboard.js';
+import { startServer } from './server.js';
 import type { VideoReport, VideoSource, GitHubProject, ReviewedVideo } from './types.js';
 import { SOURCES } from './sources.js';
 
@@ -27,11 +18,10 @@ const VIDEO_CONCURRENCY = parseInt(process.env.VIDEO_CONCURRENCY || '3', 10);
 const PROJECT_CONCURRENCY = parseInt(process.env.PROJECT_CONCURRENCY || '5', 10);
 const LLM_CONCURRENCY = parseInt(process.env.LLM_CONCURRENCY || '3', 10);
 const CRON_SCHEDULE = process.env.CRON_SCHEDULE || '';  // e.g. "0 */6 * * *"
-const GIT_REPO_URL = process.env.GIT_REPO_URL || 'https://github.com/mcowger/gha.git';
-const GIT_REPO_DIR = process.env.GIT_REPO_DIR || '/repo';
+const PORT = parseInt(process.env.PORT || '8080', 10);
 
 function validateEnv(): void {
-  const required = ['LLM_API_KEY'];
+  const required = ['LLM_API_KEY', 'YOUTUBE_API_KEY'];
   const missing = required.filter((k) => !process.env[k]);
   if (missing.length > 0) {
     console.error(`Missing required environment variables: ${missing.join(', ')}`);
@@ -45,163 +35,24 @@ const videoLimit = pLimit({ concurrency: VIDEO_CONCURRENCY });
 const projectLimit = pLimit({ concurrency: PROJECT_CONCURRENCY });
 const llmLimit = pLimit({ concurrency: LLM_CONCURRENCY });
 
-// ── Git helpers ─────────────────────────────────────────────
-
-/**
- * Ensure we have a cloned git repo to work in. If GIT_REPO_DIR doesn't exist,
- * clone it. If it does, pull latest. Then chdir into it.
- */
-async function gitInitOrPull(): Promise<void> {
-  const dir = GIT_REPO_DIR;
-  const token = process.env.GH_TOKEN;
-  const auth = { username: 'mcowger', password: token };
-  const http = await import('isomorphic-git/http/node').then(m => m.default);
-  const url = token
-    ? GIT_REPO_URL.replace('https://', `https://mcowger:${token}@`)
-    : GIT_REPO_URL;
-
-  if (!fs.existsSync(path.join(dir, '.git'))) {
-    console.log(`📋 Cloning ${GIT_REPO_URL} → ${dir}...`);
-    await git.clone({ fs, http, dir, url, onAuth: () => auth, singleBranch: true, depth: 50 });
-    console.log('  ✅ Repo cloned');
-  } else {
-    try {
-      const branch = (await git.currentBranch({ fs, dir })) || 'main';
-      const remote = (await git.listRemotes({ fs, dir }))[0]?.remote || 'origin';
-
-      // 1. Discard local modifications to tracked files before pulling
-      try {
-        await git.checkout({ fs, dir, force: true, ref: branch });
-      } catch { /* ok */ }
-
-      await git.pull({
-        fs, http, dir, remote, ref: branch, url, onAuth: () => auth, singleBranch: true,
-        author: { name: 'gha-bot', email: 'bot@gha.local' },
-        committer: { name: 'gha-bot', email: 'bot@gha.local' },
-      });
-      console.log('  ✅ Repo pulled');
-    } catch (err) {
-      console.log(`  ⚠️  Pull failed: ${err instanceof Error ? err.message : err}`);
-
-      // 2. If pull/merge fails (due to conflicts or dirty index), force reset to remote origin branch
-      try {
-        const branch = (await git.currentBranch({ fs, dir })) || 'main';
-        const remote = (await git.listRemotes({ fs, dir }))[0]?.remote || 'origin';
-        console.log(`  🔄 Attempting force reset to override local conflicts...`);
-
-        await git.fetch({ fs, http, dir, remote, ref: branch, url, onAuth: () => auth, singleBranch: true });
-        await git.checkout({ fs, dir, force: true, ref: `refs/remotes/${remote}/${branch}` });
-
-        console.log('  ✅ Force synced with remote successfully');
-      } catch (forceErr) {
-        console.log(`  ❌ Force reset failed: ${forceErr instanceof Error ? forceErr.message : forceErr}`);
-      }
-    }
-  }
-
-  process.chdir(dir);
-}
-
-async function gitCommitAndPush(message: string): Promise<void> {
-  try {
-    const dir = process.cwd();
-    const token = process.env.GH_TOKEN;
-    const remote = (await git.listRemotes({ fs, dir }))[0]?.remote || 'origin';
-    const branch = (await git.currentBranch({ fs, dir })) || 'main';
-    const repoUrl = token
-      ? GIT_REPO_URL.replace('https://', `https://mcowger:${token}@`)
-      : GIT_REPO_URL;
-
-    const auth = { username: 'mcowger', password: token };
-    const http = await import('isomorphic-git/http/node').then(m => m.default);
-
-    // Stage output files
-    const pattern = 'output/';
-    const matrix = await git.statusMatrix({ fs, dir, filter: (f: string) => f.startsWith(pattern) });
-
-    const changed = matrix.filter((row: Array<string | number>) => {
-      return row[0] === 0 && row[1] === 0  // new file
-        || row[1] !== row[2];              // modified
-    });
-
-    if (changed.length === 0) {
-      console.log('  📭 No changes to commit');
-      return;
-    }
-
-    // Stage all changed files
-    for (const [filepath] of changed) {
-      await git.add({ fs, dir, filepath });
-    }
-
-    // Compare content vs HEAD to skip no-op commits
-    let hasRealChanges = false;
-    for (const [filepath, headSha] of changed) {
-      if (headSha === 0) {
-        hasRealChanges = true;
-        break;
-      }
-      try {
-        const headOid = await git.resolveRef({ fs, dir, ref: 'HEAD' });
-        const headBlob = await git.readBlob({ fs, dir, oid: headOid, filepath: String(filepath) });
-        const headContent = Buffer.from(headBlob.blob).toString('utf-8');
-        const workContent = fs.readFileSync(path.join(dir, String(filepath)), 'utf-8');
-        if (headContent !== workContent) {
-          hasRealChanges = true;
-          break;
-        }
-      } catch {
-        hasRealChanges = true;
-        break;
-      }
-    }
-
-    if (!hasRealChanges) {
-      console.log('  📭 No content changes to commit');
-      try { await git.resetIndex({ fs, dir, filepath: '.' }); } catch { /* ok */ }
-      return;
-    }
-
-    // Commit
-    await git.commit({ fs, dir, message, author: { name: 'gha-bot', email: 'bot@gha.local' } });
-
-    // Push
-    await git.push({ fs, http, dir, remote, ref: branch, url: repoUrl, onAuth: () => auth, force: true });
-
-    console.log(`  📤 Pushed: ${message}`);
-  } catch (err) {
-    console.error(`  ❌ Git push failed: ${err instanceof Error ? err.message : err}`);
-  }
-}
-
 // ── Core pipeline ───────────────────────────────────────────
 
 async function processProject(p: GitHubProject): Promise<GitHubProject> {
   const label = `${p.owner}/${p.repo}`;
 
-  setCurrentProject(label);
-
   const detailed = await fetchProjectDetails(p);
 
   if (!detailed.readme) {
-    logLine(`⚠️  No README found for ${label}`);
+    console.log(`⚠️  No README found for ${label}`);
     detailed.error = 'No README found';
   } else {
-    logLine(`📖 README fetched for ${label} (${detailed.readme.length} chars)`);
-    addCurrentLlm(label);
+    console.log(`📖 README fetched for ${label} (${detailed.readme.length} chars)`);
     const summary = await llmLimit(() => summarizeReadme(detailed.readme!, p.owner, p.repo));
-    removeCurrentLlm(label);
     detailed.summary = summary;
-    incLlmDone();
-    if (summary) {
-      logLine(`✅ Summarized ${label}`);
-    } else {
-      logLine(`⚠️  Summarization failed for ${label}`);
-    }
+    console.log(summary ? `✅ Summarized ${label}` : `⚠️  Summarization failed for ${label}`);
   }
 
-  logLine(`⭐ ${detailed.stars ?? '?'} stars | ${detailed.language ?? 'unknown'} | ${label}`);
-  incProjectsDone();
+  console.log(`⭐ ${detailed.stars ?? '?'} stars | ${detailed.language ?? 'unknown'} | ${label}`);
   return detailed;
 }
 
@@ -216,12 +67,10 @@ async function processVideoWithDescription(
   state: { videos: ReviewedVideo[] },
   source?: VideoSource,
 ): Promise<VideoResult> {
-  setCurrentVideo(video.title);
-
   let projects = parseGitHubUrls(description);
 
   if (projects.length === 0) {
-    logLine(`No GitHub links in description for ${video.title}, checking pinned comment...`);
+    console.log(`No GitHub links in description for ${video.title}, checking pinned comment...`);
     const comment = await getPinnedComment(video.id);
     if (comment) {
       projects = parseGitHubUrlsFromComment(comment);
@@ -229,8 +78,7 @@ async function processVideoWithDescription(
   }
 
   if (projects.length === 0) {
-    logLine(`⚠️  No projects found in ${video.title}`);
-    incVideosDone();
+    console.log(`⚠️  No projects found in ${video.title}`);
     return {
       reviewed: {
         videoId: video.id,
@@ -259,8 +107,7 @@ async function processVideoWithDescription(
   };
 
   const jsonPath = writeReportJson(report, OUTPUT_DIR);
-  logLine(`💾 JSON → ${jsonPath}`);
-  incReportsWritten();
+  console.log(`💾 JSON → ${jsonPath}`);
 
   state.videos.push({
     videoId: video.id,
@@ -271,13 +118,12 @@ async function processVideoWithDescription(
   });
   saveState(STATE_FILE, state);
 
-  incVideosDone();
   return { reviewed: state.videos[state.videos.length - 1], report };
 }
 
 // ── Commands ────────────────────────────────────────────────
 
-async function fetch(): Promise<void> {
+async function fetchReports(): Promise<void> {
   validateEnv();
 
   const state = loadState(STATE_FILE);
@@ -302,7 +148,7 @@ async function fetch(): Promise<void> {
 
   if (taggedVideos.length === 0) {
     console.error('❌ No videos fetched from any source. Exiting.');
-    process.exit(1);
+    return;
   }
 
   // Deduplicate by video ID (keep first occurrence, which preserves source tag)
@@ -319,9 +165,7 @@ async function fetch(): Promise<void> {
     return;
   }
 
-  // Pre-fetch descriptions to discover total project count
   const videoDescriptions = new Map<string, string>();
-  let totalProjects = 0;
 
   for (const { video } of newTagged) {
     try {
@@ -336,7 +180,6 @@ async function fetch(): Promise<void> {
         const comment = await getPinnedComment(video.id);
         if (comment) projects = parseGitHubUrlsFromComment(comment);
       }
-      totalProjects += projects.length;
 
       // Fetch precise upload date for sorting
       video.uploadDate = await getVideoUploadDate(video.id);
@@ -347,18 +190,12 @@ async function fetch(): Promise<void> {
     }
   }
 
-  initDashboard(videoLimit, projectLimit, llmLimit, githubLimit);
-  setVideoTotal(newTagged.length);
-  setProjectTotal(totalProjects);
-
   const results = await Promise.all(
     newTagged.map(({ video, source }) => {
       const description = videoDescriptions.get(video.id) || '';
       return videoLimit(() => processVideoWithDescription(video, description, state, source));
     }),
   );
-
-  stopDashboard();
 
   const projectCount = results.reduce((sum, r) => sum + r.reviewed.projectCount, 0);
   console.log(`\n✨ Fetch complete! ${results.length} videos, ${projectCount} projects processed`);
@@ -374,22 +211,16 @@ async function render(): Promise<void> {
 }
 
 /**
- * Run fetch + render + git push. Used by both the 'run' command and the daemon.
+ * Run fetch + render. Used by both the 'run' command and each daemon cycle.
  */
 async function runOnce(): Promise<void> {
   console.log(`\n${'═'.repeat(50)}`);
   console.log(`  GithubAwesome Monitor — ${new Date().toISOString()}`);
   console.log(`${'═'.repeat(50)}\n`);
 
-  await gitInitOrPull();
-
-  await fetch();
+  await fetchReports();
   console.log();
   await render();
-
-  // Commit and push output
-  const dateStr = new Date().toISOString().slice(0, 10);
-  await gitCommitAndPush(`📡 update reports ${dateStr}`);
 }
 
 /**
@@ -438,13 +269,17 @@ function getNextCronDelay(expression: string): number {
 }
 
 /**
- * Daemon mode: runs on a cron schedule, fetches + renders + pushes each cycle.
+ * Daemon mode: starts the self-serving HTTP server immediately (serving whatever
+ * reports already exist on disk), then fetches + renders on a CRON_SCHEDULE,
+ * updating the same output directory the server reads from.
  */
 async function daemon(): Promise<void> {
   if (!CRON_SCHEDULE) {
     console.error('CRON_SCHEDULE is required for daemon mode. e.g. "0 */6 * * *"');
     process.exit(1);
   }
+
+  startServer(OUTPUT_DIR, PORT);
 
   console.log(`🕐 Daemon mode — schedule: ${CRON_SCHEDULE}\n`);
 
@@ -499,11 +334,13 @@ function printUsage(): void {
 Commands:
   fetch    Fetch new videos and gather data (writes JSON to output dir)
   render   Render JSON data files to HTML
-  run      Fetch + render + git push (one-shot)
-  daemon   Run on a CRON_SCHEDULE, fetch + render + push each cycle
-  (none)   Same as 'run'
+  run      Fetch + render (one-shot, no server)
+  serve    Start the HTTP server only (serves existing output dir)
+  daemon   Start the HTTP server and fetch + render on a CRON_SCHEDULE
+  (none)   Same as 'daemon'
 
 Environment variables:
+  PORT                 Port for the built-in HTTP server (default: 8080)
   CRON_SCHEDULE        Cron expression for daemon mode (e.g. "0 */6 * * *")
   VIDEO_CONCURRENCY    Max parallel videos (default: 3)
   PROJECT_CONCURRENCY  Max parallel project fetches (default: 5)
@@ -515,7 +352,7 @@ async function main(): Promise<void> {
 
   switch (command) {
     case 'fetch':
-      await fetch();
+      await fetchReports();
       break;
     case 'render':
       await render();
@@ -523,11 +360,12 @@ async function main(): Promise<void> {
     case 'run':
       await runOnce();
       break;
-    case 'daemon':
-      await daemon();
+    case 'serve':
+      startServer(OUTPUT_DIR, PORT);
       break;
+    case 'daemon':
     case undefined:
-      await runOnce();
+      await daemon();
       break;
     case '--help':
     case '-h':

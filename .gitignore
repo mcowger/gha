@@ -1,5 +1,5 @@
-# Output — we commit these for GitHub Pages
-# output/
+# Output — generated reports, served locally by the app, no longer committed
+output/
 
 # State — not committed, local only
 state/

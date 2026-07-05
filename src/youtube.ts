@@ -1,13 +1,32 @@
-import { Innertube, YTNodes } from 'youtubei.js';
 import type { VideoReport } from './types.js';
 
-let _yt: Innertube | null = null;
+const API_BASE = 'https://www.googleapis.com/youtube/v3';
 
-async function getYT(): Promise<Innertube> {
-  if (!_yt) {
-    _yt = await Innertube.create({ generate_session_locally: true });
+function getApiKey(): string {
+  const key = process.env.YOUTUBE_API_KEY;
+  if (!key) throw new Error('YOUTUBE_API_KEY environment variable is required');
+  return key;
+}
+
+async function ytGet<T = any>(endpoint: string, params: Record<string, string>): Promise<T> {
+  const url = new URL(`${API_BASE}/${endpoint}`);
+  url.searchParams.set('key', getApiKey());
+  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+
+  const resp = await fetch(url.toString());
+  if (!resp.ok) {
+    const body = await resp.text();
+    throw new Error(`YouTube API ${endpoint} failed (${resp.status}): ${body.slice(0, 300)}`);
   }
-  return _yt;
+  return resp.json() as Promise<T>;
+}
+
+/** Parse an ISO 8601 duration (e.g. "PT1M30S") into seconds. */
+function parseIsoDuration(iso: string): number {
+  const match = iso.match(/^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/);
+  if (!match) return 0;
+  const [, h, m, s] = match;
+  return (parseInt(h || '0', 10) * 3600) + (parseInt(m || '0', 10) * 60) + parseInt(s || '0', 10);
 }
 
 export interface ChannelVideo {
@@ -21,19 +40,85 @@ export interface ChannelVideo {
 }
 
 /**
- * Fetch the precise upload date for a video by scraping the watch page.
- * YouTube InnerTube only returns relative text ("17 hours ago"), but the
- * HTML page contains an ISO timestamp in the uploadDate microformat.
+ * Resolve a channel ID to its "uploads" playlist ID (contentDetails.relatedPlaylists.uploads).
  */
-export async function getVideoUploadDate(videoId: string): Promise<string | null> {
-  try {
-    const resp = await fetch(`https://www.youtube.com/watch?v=${videoId}`);
-    const html = await resp.text();
-    const match = html.match(/"uploadDate":"([^"]+)"/);
-    return match?.[1] || null;
-  } catch {
-    return null;
+async function getUploadsPlaylistId(channelId: string): Promise<string> {
+  const data = await ytGet('channels', { part: 'contentDetails', id: channelId });
+  const uploads = data.items?.[0]?.contentDetails?.relatedPlaylists?.uploads;
+  if (!uploads) throw new Error(`Could not resolve uploads playlist for channel ${channelId}`);
+  return uploads;
+}
+
+/**
+ * Fetch full video details (snippet + duration) for a batch of video IDs (max 50 per call).
+ */
+async function getVideosByIds(ids: string[]): Promise<ChannelVideo[]> {
+  const videos: ChannelVideo[] = [];
+
+  for (let i = 0; i < ids.length; i += 50) {
+    const batch = ids.slice(i, i + 50);
+    const data = await ytGet('videos', { part: 'snippet,contentDetails', id: batch.join(',') });
+
+    for (const item of data.items ?? []) {
+      const durationSeconds = parseIsoDuration(item.contentDetails?.duration ?? 'PT0S');
+      const isShort = durationSeconds > 0 && durationSeconds <= 60;
+      if (isShort) continue;
+
+      const thumbs = item.snippet?.thumbnails ?? {};
+      const thumbnails = Object.values(thumbs).map((t: any) => ({
+        url: t.url,
+        width: t.width ?? 0,
+        height: t.height ?? 0,
+      })).sort((a: any, b: any) => b.width - a.width);
+
+      videos.push({
+        id: item.id,
+        title: item.snippet?.title || 'Untitled',
+        durationSeconds,
+        publishedText: item.snippet?.publishedAt,
+        uploadDate: item.snippet?.publishedAt ?? null,
+        thumbnails,
+        isShort: false,
+      });
+    }
   }
+
+  return videos;
+}
+
+/**
+ * Fetch recent videos from a YouTube playlist (or a channel's uploads playlist),
+ * newest first, filtering out Shorts (duration <= 60s).
+ */
+export async function getPlaylistVideos(
+  playlistId: string,
+  maxVideos: number = 10,
+): Promise<ChannelVideo[]> {
+  const videoIds: string[] = [];
+  let pageToken: string | undefined;
+
+  // Pull a bit more than requested since some entries will be filtered as Shorts.
+  const fetchTarget = maxVideos * 3;
+
+  do {
+    const data = await ytGet('playlistItems', {
+      part: 'contentDetails',
+      playlistId,
+      maxResults: '50',
+      ...(pageToken ? { pageToken } : {}),
+    });
+
+    for (const item of data.items ?? []) {
+      const id = item.contentDetails?.videoId;
+      if (id) videoIds.push(id);
+    }
+
+    pageToken = data.nextPageToken;
+  } while (pageToken && videoIds.length < fetchTarget);
+
+  const videos = await getVideosByIds(videoIds);
+  videos.sort((a, b) => (b.uploadDate ?? '').localeCompare(a.uploadDate ?? ''));
+  return videos.slice(0, maxVideos);
 }
 
 /**
@@ -43,190 +128,57 @@ export async function getChannelVideos(
   channelId: string,
   maxVideos: number = 10,
 ): Promise<ChannelVideo[]> {
-  const yt = await getYT();
-  const channel = await yt.getChannel(channelId);
-  const videosFeed = await channel.getVideos();
-
-  const videos: ChannelVideo[] = [];
-
-  for (const video of videosFeed.videos) {
-    // Skip Shorts by node type
-    if (
-      video instanceof YTNodes.ReelItem ||
-      video instanceof YTNodes.ShortsLockupView
-    ) {
-      continue;
-    }
-
-    // Extract common properties
-    let id: string | undefined;
-    let title: string | undefined;
-    let durationSeconds: number | undefined;
-    let publishedText: string | undefined;
-    let thumbnails: { url: string; width: number; height: number }[] = [];
-
-    // Handle different video node types
-    if ('id' in video) id = (video as any).id;
-    if ('video_id' in video) id = (video as any).video_id;
-    if ('title' in video) {
-      title =
-        typeof (video as any).title === 'string'
-          ? (video as any).title
-          : (video as any).title?.toString();
-    }
-    if ('duration' in video) {
-      const dur = (video as any).duration;
-      // Channel feed returns {text, seconds}; getBasicInfo returns a number
-      durationSeconds = typeof dur === 'number' ? dur : dur?.seconds;
-    }
-    if ('published' in video)
-      publishedText = (video as any).published?.toString();
-    if ('thumbnails' in video) {
-      const thumbs = (video as any).thumbnails;
-      if (Array.isArray(thumbs)) {
-        thumbnails = thumbs.map((t: any) => ({
-          url: t.url,
-          width: t.width,
-          height: t.height,
-        }));
-      }
-    }
-
-    if (!id) continue;
-
-    // Filter by duration — skip videos ≤ 60s (likely Shorts)
-    const isShort = durationSeconds !== undefined && durationSeconds <= 60;
-    if (isShort) continue;
-
-    videos.push({
-      id,
-      title: title || 'Untitled',
-      durationSeconds,
-      publishedText,
-      uploadDate: null, // fetched separately via getVideoUploadDate
-      thumbnails,
-      isShort: false,
-    });
-
-    if (videos.length >= maxVideos) break;
-  }
-
-  return videos;
+  const uploadsPlaylistId = await getUploadsPlaylistId(channelId);
+  return getPlaylistVideos(uploadsPlaylistId, maxVideos);
 }
 
 /**
  * Get the description text for a specific video.
- * Falls back to checking the pinned comment if the description has no GitHub links.
  */
 export async function getVideoDescription(videoId: string): Promise<string> {
-  const yt = await getYT();
-  const info = await yt.getBasicInfo(videoId);
-  const description = info.basic_info.short_description || '';
-  return description;
+  const data = await ytGet('videos', { part: 'snippet', id: videoId });
+  return data.items?.[0]?.snippet?.description || '';
 }
 
 /**
- * Get the top (pinned) comment for a video as a fallback source of project links.
+ * Get the precise upload date (ISO 8601) for a video.
  */
-export async function getPinnedComment(
-  videoId: string,
-): Promise<string | null> {
+export async function getVideoUploadDate(videoId: string): Promise<string | null> {
+  const data = await ytGet('videos', { part: 'snippet', id: videoId });
+  return data.items?.[0]?.snippet?.publishedAt ?? null;
+}
+
+/**
+ * Get the top comment for a video as a fallback source of project links.
+ * Returns null if comments are disabled or the video has none.
+ */
+export async function getPinnedComment(videoId: string): Promise<string | null> {
   try {
-    const yt = await getYT();
-    const comments = await yt.getComments(videoId);
-    if (comments.contents && comments.contents.length > 0) {
-      const topComment = comments.contents[0];
-      return topComment.comment?.content?.toString() || null;
-    }
-  } catch {
-    // youtubei.js parser can throw on unexpected response shapes
-    // (e.g. CommentFilterContextView not found). Just skip.
-  }
-  return null;
-}
-
-/**
- * Fetch recent videos from a YouTube playlist, returning them newest-first.
- *
- * Playlists are delivered oldest-first by the InnerTube API, so we paginate
- * through all continuation pages to collect every video, then reverse to get
- * the newest entries first.  Only the last `maxVideos` (after reversing) are
- * returned, which avoids processing hundreds of historical entries on the first
- * run (the caller's state file handles skipping already-reviewed ones).
- */
-export async function getPlaylistVideos(
-  playlistId: string,
-  maxVideos: number = 10,
-): Promise<ChannelVideo[]> {
-  const yt = await getYT();
-
-  // Collect all video nodes across all pages
-  const allNodes: any[] = [];
-  let page = await yt.getPlaylist(playlistId);
-  for (const v of page.videos ?? []) allNodes.push(v);
-
-  while (page.has_continuation) {
-    page = await page.getContinuation();
-    for (const v of page.videos ?? []) allNodes.push(v);
-  }
-
-  // Reverse so index 0 is the newest video
-  allNodes.reverse();
-
-  const videos: ChannelVideo[] = [];
-
-  for (const video of allNodes) {
-    if (videos.length >= maxVideos) break;
-
-    // PlaylistVideo nodes expose id, title, duration, thumbnails directly
-    const id: string | undefined = video.id ?? video.video_id;
-    if (!id) continue;
-
-    const title: string =
-      typeof video.title === 'string'
-        ? video.title
-        : video.title?.toString?.() ?? 'Untitled';
-
-    const dur = video.duration;
-    const durationSeconds: number | undefined =
-      typeof dur === 'number' ? dur : dur?.seconds;
-
-    // Skip Shorts (≤ 60 s)
-    if (durationSeconds !== undefined && durationSeconds <= 60) continue;
-
-    const thumbnails: { url: string; width: number; height: number }[] =
-      Array.isArray(video.thumbnails)
-        ? video.thumbnails.map((t: any) => ({
-            url: t.url,
-            width: t.width ?? 0,
-            height: t.height ?? 0,
-          }))
-        : [];
-
-    videos.push({
-      id,
-      title,
-      durationSeconds,
-      publishedText: undefined, // not available on PlaylistVideo nodes
-      uploadDate: null,         // fetched separately via getVideoUploadDate
-      thumbnails,
-      isShort: false,
+    const data = await ytGet('commentThreads', {
+      part: 'snippet',
+      videoId,
+      order: 'relevance',
+      maxResults: '1',
+      textFormat: 'plainText',
     });
+    const top = data.items?.[0]?.snippet?.topLevelComment?.snippet?.textDisplay;
+    return top || null;
+  } catch {
+    // Comments disabled, or any other API error — just skip.
+    return null;
   }
-
-  return videos;
 }
 
 /**
  * Resolve a YouTube handle (e.g., @GithubAwesome) to a channel ID.
  */
 export async function resolveChannelId(handle: string): Promise<string> {
-  const yt = await getYT();
-  // If it's already a channel ID (starts with UC), return as-is
   if (handle.startsWith('UC')) return handle;
-  // Otherwise resolve the handle
-  const resolved = await yt.resolveURL(`https://www.youtube.com/${handle}`);
-  return resolved.payload.browseId;
+  const cleanHandle = handle.startsWith('@') ? handle : `@${handle}`;
+  const data = await ytGet('channels', { part: 'id', forHandle: cleanHandle });
+  const id = data.items?.[0]?.id;
+  if (!id) throw new Error(`Could not resolve channel handle ${handle}`);
+  return id;
 }
 
 /**
@@ -235,16 +187,16 @@ export async function resolveChannelId(handle: string): Promise<string> {
 export async function getVideoDetails(
   videoId: string,
 ): Promise<Pick<VideoReport, 'videoId' | 'title' | 'publishedAt' | 'thumbnailUrl' | 'videoUrl'>> {
-  const yt = await getYT();
-  const info = await yt.getBasicInfo(videoId);
-
-  const thumbnail =
-    info.basic_info.thumbnail?.sort((a, b) => b.width - a.width)[0]?.url || '';
+  const data = await ytGet('videos', { part: 'snippet', id: videoId });
+  const item = data.items?.[0];
+  const thumbs = item?.snippet?.thumbnails ?? {};
+  const thumbnail = Object.values(thumbs).map((t: any) => t)
+    .sort((a: any, b: any) => b.width - a.width)[0]?.url || '';
 
   return {
     videoId,
-    title: info.basic_info.title || 'Untitled',
-    publishedAt: new Date().toISOString(), // InnerTube doesn't give exact publish date easily
+    title: item?.snippet?.title || 'Untitled',
+    publishedAt: item?.snippet?.publishedAt || new Date().toISOString(),
     thumbnailUrl: thumbnail,
     videoUrl: `https://www.youtube.com/watch?v=${videoId}`,
   };

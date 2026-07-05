@@ -10,7 +10,8 @@
     "rootDir": "src",
     "resolveJsonModule": true,
     "allowImportingTsExtensions": true,
-    "noEmit": true
+    "noEmit": true,
+    "types": ["bun"]
   },
   "include": ["src/**/*"]
 }
