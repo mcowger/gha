@@ -3,7 +3,8 @@ import pLimit from 'p-limit';
 import { join } from 'node:path';
 
 import { loadState, saveState, isReviewed, reconcileStateWithRepos } from './state.js';
-import { loadRepoState, saveRepoState, upsertRepo } from './repos.js';
+import { loadRepoState, saveRepoState, upsertRepo, findRepo } from './repos.js';
+import { sendNotifications } from './notifier.js';
 import { getChannelVideos, getPlaylistVideos, getVideoDescription, getVideoUploadDate, getPinnedComment } from './youtube.js';
 import { parseGitHubUrls, parseGitHubUrlsFromComment } from './parser.js';
 import { fetchProjectDetails } from './github.js';
@@ -105,7 +106,7 @@ async function processVideoWithDescription(
   state: { videos: ReviewedVideo[] },
   repoState: ReturnType<typeof loadRepoState>,
   source?: VideoSource,
-): Promise<{ reviewed: ReviewedVideo }> {
+): Promise<{ reviewed: ReviewedVideo; newRepos: any[] }> {
   let projects = parseGitHubUrls(description);
 
   if (projects.length === 0) {
@@ -126,6 +127,7 @@ async function processVideoWithDescription(
         retrievedAt: new Date().toISOString(),
         projectCount: 0,
       },
+      newRepos: [],
     };
   }
 
@@ -136,13 +138,21 @@ async function processVideoWithDescription(
   const mentionedAt = video.uploadDate || video.publishedText || new Date().toISOString();
   const videoUrl = `https://www.youtube.com/watch?v=${video.id}`;
 
+  const newRepos: any[] = [];
   for (const p of enrichedProjects) {
+    const isNew = !findRepo(repoState, p.owner, p.repo);
     upsertRepo(
       repoState,
       p,
       { videoId: video.id, videoTitle: video.title, videoUrl, mentionedAt, ...(source ? { source } : {}) },
       mentionedAt,
     );
+    if (isNew) {
+      const entry = findRepo(repoState, p.owner, p.repo);
+      if (entry) {
+        newRepos.push(entry);
+      }
+    }
   }
   saveRepoState(REPO_STATE_FILE, repoState);
   console.log(`💾 Repo state → ${REPO_STATE_FILE} (${enrichedProjects.length} project(s) from "${video.title}")`);
@@ -157,7 +167,7 @@ async function processVideoWithDescription(
   state.videos.push(reviewed);
   saveState(STATE_FILE, state);
 
-  return { reviewed };
+  return { reviewed, newRepos };
 }
 
 // ── Commands ────────────────────────────────────────────────
@@ -239,8 +249,14 @@ async function fetchReports(): Promise<void> {
     }),
   );
 
+  const newRepos = results.flatMap((r) => r.newRepos);
   const projectCount = results.reduce((sum, r) => sum + r.reviewed.projectCount, 0);
   console.log(`\n✨ Fetch complete! ${results.length} videos, ${projectCount} projects processed`);
+
+  if (newRepos.length > 0) {
+    console.log(`📢 Sending notifications for ${newRepos.length} new repository/repositories...`);
+    await sendNotifications(newRepos);
+  }
 }
 
 async function render(): Promise<void> {

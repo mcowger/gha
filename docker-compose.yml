@@ -1,0 +1,17 @@
+services:
+  gha:
+    image: ghcr.io/mcowger/gha:latest
+    # Uncomment to build from source instead of pulling from GHCR:
+    # build: .
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    volumes:
+      - gha-output:/app/output
+      - gha-state:/app/state
+
+volumes:
+  gha-output:
+  gha-state:
