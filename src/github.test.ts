@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { describe, expect, test } from 'bun:test';
-import { fetchProjectDetails, fetchReadme, fetchRepoInfo } from './github.js';
+import { fetchProjectDetails, fetchReadme, fetchRepoInfo, getUserLists } from './github.js';
 
 // octocat/Hello-World is GitHub's own long-lived test fixture repo.
 const OWNER = 'octocat';
@@ -46,5 +46,17 @@ describe.skipIf(!liveEnabled)('github.ts (live GitHub API)', () => {
     expect(project.readme).toBeTruthy();
     expect(project.stars).toBeGreaterThan(0);
     expect(project.error).toBeUndefined();
+  });
+
+  // getUserLists is read-only, so it's safe to exercise here. addRepoToList
+  // is deliberately not covered — it's a real, persistent mutation on the
+  // authenticated user's GitHub account (same reasoning as skipping starRepo).
+  test('getUserLists returns an array of {id, name} for the authenticated user', async () => {
+    const lists = await getUserLists();
+    expect(Array.isArray(lists)).toBe(true);
+    for (const list of lists) {
+      expect(typeof list.id).toBe('string');
+      expect(typeof list.name).toBe('string');
+    }
   });
 });

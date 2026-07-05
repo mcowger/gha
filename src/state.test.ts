@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { isReviewed, loadState, markReviewed, reconcileStateWithOutput, saveState } from './state.js';
-import type { ReviewedVideo, VideoReport } from './types.js';
+import { isReviewed, loadState, markReviewed, reconcileStateWithRepos, saveState } from './state.js';
+import type { ReviewedVideo, RepoStateFile } from './types.js';
 
 let dir: string;
 let stateFile: string;
@@ -62,56 +62,62 @@ describe('markReviewed', () => {
   });
 });
 
-describe('reconcileStateWithOutput', () => {
-  function makeReport(overrides: Partial<VideoReport> = {}): VideoReport {
+describe('reconcileStateWithRepos', () => {
+  function makeRepoState(videoId: string, videoTitle: string, mentionedAt: string): RepoStateFile {
     return {
-      videoId: 'vid1',
-      title: 'Test Video',
-      publishedAt: '2026-01-01T00:00:00.000Z',
-      uploadDate: '2026-01-01T00:00:00.000Z',
-      thumbnailUrl: 'https://example.com/thumb.jpg',
-      videoUrl: 'https://www.youtube.com/watch?v=vid1',
-      projects: [],
-      ...overrides,
+      repos: [
+        {
+          owner: 'owner',
+          repo: 'repo',
+          url: 'https://github.com/owner/repo',
+          description: null,
+          stars: null,
+          language: null,
+          summary: null,
+          firstDiscoveredAt: mentionedAt,
+          mentions: [{ videoId, videoTitle, videoUrl: `https://youtu.be/${videoId}`, mentionedAt }],
+        },
+      ],
     };
   }
 
-  test('marks reports already on disk as reviewed without touching known ones', () => {
-    writeFileSync(join(dir, 'ghawesome-2026-01-01-vid1.json'), JSON.stringify(makeReport()));
-    const state = reconcileStateWithOutput({ videos: [] }, dir);
+  test('marks videos mentioned in repo state as reviewed without touching known ones', () => {
+    const repoState = makeRepoState('vid1', 'Video One', '2026-01-01T00:00:00.000Z');
+    const state = reconcileStateWithRepos({ videos: [] }, repoState);
     expect(state.videos).toHaveLength(1);
     expect(state.videos[0].videoId).toBe('vid1');
   });
 
   test('does not duplicate an entry already tracked in state', () => {
-    writeFileSync(join(dir, 'ghawesome-2026-01-01-vid1.json'), JSON.stringify(makeReport()));
-    const state = reconcileStateWithOutput({ videos: [video] }, dir);
+    const repoState = makeRepoState('abc123', 'Test Video', '2026-01-01T00:00:00.000Z');
+    const state = reconcileStateWithRepos({ videos: [video] }, repoState);
     expect(state.videos.filter((v) => v.videoId === video.videoId)).toHaveLength(1);
   });
 
-  test('collapses duplicate reports for the same video, keeping the earliest and deleting the rest', () => {
-    writeFileSync(join(dir, 'ghawesome-2026-01-01-vid1.json'), JSON.stringify(makeReport()));
-    writeFileSync(join(dir, 'ghawesome-2026-02-01-vid1.json'), JSON.stringify(makeReport()));
-    writeFileSync(join(dir, 'ghawesome-2026-02-01-vid1.html'), '<html></html>');
-
-    const state = reconcileStateWithOutput({ videos: [] }, dir);
-
+  test('counts multiple mentions of the same video as its project count', () => {
+    const repoState: RepoStateFile = {
+      repos: [
+        {
+          owner: 'a', repo: 'first', url: 'https://github.com/a/first',
+          description: null, stars: null, language: null, summary: null,
+          firstDiscoveredAt: '2026-01-01T00:00:00.000Z',
+          mentions: [{ videoId: 'vid1', videoTitle: 'Video', videoUrl: 'https://youtu.be/vid1', mentionedAt: '2026-01-01T00:00:00.000Z' }],
+        },
+        {
+          owner: 'b', repo: 'second', url: 'https://github.com/b/second',
+          description: null, stars: null, language: null, summary: null,
+          firstDiscoveredAt: '2026-01-01T00:00:00.000Z',
+          mentions: [{ videoId: 'vid1', videoTitle: 'Video', videoUrl: 'https://youtu.be/vid1', mentionedAt: '2026-01-01T00:00:00.000Z' }],
+        },
+      ],
+    };
+    const state = reconcileStateWithRepos({ videos: [] }, repoState);
     expect(state.videos).toHaveLength(1);
-    expect(existsSync(join(dir, 'ghawesome-2026-01-01-vid1.json'))).toBe(true);
-    expect(existsSync(join(dir, 'ghawesome-2026-02-01-vid1.json'))).toBe(false);
-    expect(existsSync(join(dir, 'ghawesome-2026-02-01-vid1.html'))).toBe(false);
+    expect(state.videos[0].projectCount).toBe(2);
   });
 
-  test('returns state unchanged when outputDir does not exist', () => {
-    const state = reconcileStateWithOutput({ videos: [video] }, join(dir, 'nonexistent'));
+  test('returns state unchanged when repo state is empty', () => {
+    const state = reconcileStateWithRepos({ videos: [video] }, { repos: [] });
     expect(state.videos).toEqual([video]);
-  });
-
-  test('ignores unrelated and malformed files', () => {
-    writeFileSync(join(dir, 'not-a-report.json'), '{}');
-    writeFileSync(join(dir, 'ghawesome-2026-01-01-vidbad.json'), 'not json');
-    const files = readdirSync(dir);
-    expect(files.length).toBe(2);
-    expect(() => reconcileStateWithOutput({ videos: [] }, dir)).not.toThrow();
   });
 });

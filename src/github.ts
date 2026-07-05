@@ -1,6 +1,6 @@
 import { Octokit } from '@octokit/rest';
 import pLimit from 'p-limit';
-import type { GitHubProject } from './types.js';
+import type { GitHubList, GitHubProject } from './types.js';
 
 /** Concurrency limiter for GitHub API calls — keeps us under rate limits. */
 export const githubLimit = pLimit({ concurrency: 5 });
@@ -148,6 +148,88 @@ export async function fetchRepoInfo(
     }
     return { description: null, stars: null, language: null };
   }
+}
+
+/**
+ * Star a repository as the authenticated user. Requires GH_TOKEN to be set
+ * with a scope that permits starring (`public_repo` or `repo`).
+ */
+export async function starRepo(owner: string, repo: string): Promise<void> {
+  if (!process.env.GH_TOKEN) {
+    throw new Error('GH_TOKEN is required to star repos');
+  }
+  const octokit = getOctokit();
+  await withRetry(() => octokit.rest.activity.starRepoForAuthenticatedUser({ owner, repo }));
+}
+
+/**
+ * Fetch the authenticated user's GitHub Lists (the feature for organizing
+ * starred repos into named collections). GitHub has no official REST or
+ * documented GraphQL API for Lists — this uses the same undocumented
+ * `viewer.lists` GraphQL field the github.com web UI itself calls, found by
+ * introspecting the schema. It may stop working without notice if GitHub
+ * changes it.
+ */
+export async function getUserLists(): Promise<GitHubList[]> {
+  if (!process.env.GH_TOKEN) {
+    throw new Error('GH_TOKEN is required to fetch GitHub Lists');
+  }
+  const octokit = getOctokit();
+  const result = await withRetry(() =>
+    octokit.graphql<{ viewer: { lists: { nodes: GitHubList[] } } }>(
+      `query { viewer { lists(first: 100) { nodes { id name } } } }`,
+    ),
+  );
+  return result.viewer.lists.nodes;
+}
+
+/**
+ * Add a repository to one of the authenticated user's GitHub Lists.
+ * The underlying `updateUserListsForItem` mutation (also undocumented —
+ * see `getUserLists`) replaces the full set of lists an item belongs to, so
+ * this fetches the item's current list memberships first and merges the
+ * new list in rather than overwriting existing ones.
+ */
+export async function addRepoToList(owner: string, repo: string, listId: string): Promise<void> {
+  if (!process.env.GH_TOKEN) {
+    throw new Error('GH_TOKEN is required to add repos to a list');
+  }
+  const octokit = getOctokit();
+
+  const { data: repoData } = await withRetry(() => octokit.rest.repos.get({ owner, repo }));
+  const itemId = repoData.node_id;
+
+  const membership = await withRetry(() =>
+    octokit.graphql<{ viewer: { lists: { nodes: { id: string; items: { nodes: { id: string }[] } }[] } } }>(
+      `query {
+        viewer {
+          lists(first: 100) {
+            nodes {
+              id
+              items(first: 100) {
+                nodes { ... on Repository { id } }
+              }
+            }
+          }
+        }
+      }`,
+    ),
+  );
+  const existingListIds = membership.viewer.lists.nodes
+    .filter((list) => list.items.nodes.some((item) => item.id === itemId))
+    .map((list) => list.id);
+  const listIds = existingListIds.includes(listId) ? existingListIds : [...existingListIds, listId];
+
+  await withRetry(() =>
+    octokit.graphql(
+      `mutation($itemId: ID!, $listIds: [ID!]!) {
+        updateUserListsForItem(input: { itemId: $itemId, listIds: $listIds }) {
+          lists { id name }
+        }
+      }`,
+      { itemId, listIds },
+    ),
+  );
 }
 
 /**

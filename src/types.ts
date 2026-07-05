@@ -28,13 +28,36 @@ export interface VideoSource {
   id: string;
 }
 
-export interface VideoReport {
+/** One video that mentioned a given repo. */
+export interface RepoMention {
   videoId: string;
-  title: string;
-  publishedAt: string;
-  uploadDate: string | null;
-  thumbnailUrl: string;
+  videoTitle: string;
   videoUrl: string;
-  projects: GitHubProject[];
+  mentionedAt: string;
   source?: VideoSource;
+}
+
+/** A GitHub repo discovered from one or more videos, keyed by owner/repo. */
+export interface RepoEntry {
+  owner: string;
+  repo: string;
+  url: string;
+  description: string | null;
+  stars: number | null;
+  language: string | null;
+  summary: string | null;
+  firstDiscoveredAt: string;
+  mentions: RepoMention[];
+  viewed?: boolean;
+  starred?: boolean;
+}
+
+/** One of the authenticated user's GitHub Lists (star-organizing lists). */
+export interface GitHubList {
+  id: string;
+  name: string;
+}
+
+export interface RepoStateFile {
+  repos: RepoEntry[];
 }

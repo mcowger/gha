@@ -1,4 +1,3 @@
-import type { VideoReport } from './types.js';
 
 const API_BASE = 'https://www.googleapis.com/youtube/v3';
 
@@ -181,12 +180,18 @@ export async function resolveChannelId(handle: string): Promise<string> {
   return id;
 }
 
+interface VideoDetails {
+  videoId: string;
+  title: string;
+  publishedAt: string;
+  thumbnailUrl: string;
+  videoUrl: string;
+}
+
 /**
- * Build a VideoReport-friendly structure by fetching video details.
+ * Fetch basic video details (title, published date, thumbnail, URL).
  */
-export async function getVideoDetails(
-  videoId: string,
-): Promise<Pick<VideoReport, 'videoId' | 'title' | 'publishedAt' | 'thumbnailUrl' | 'videoUrl'>> {
+export async function getVideoDetails(videoId: string): Promise<VideoDetails> {
   const data = await ytGet('videos', { part: 'snippet', id: videoId });
   const item = data.items?.[0];
   const thumbs = item?.snippet?.thumbnails ?? {};

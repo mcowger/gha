@@ -1,19 +1,22 @@
 import 'dotenv/config';
 import pLimit from 'p-limit';
+import { join } from 'node:path';
 
-import { loadState, saveState, isReviewed, reconcileStateWithOutput } from './state.js';
+import { loadState, saveState, isReviewed, reconcileStateWithRepos } from './state.js';
+import { loadRepoState, saveRepoState, upsertRepo } from './repos.js';
 import { getChannelVideos, getPlaylistVideos, getVideoDescription, getVideoUploadDate, getPinnedComment } from './youtube.js';
 import { parseGitHubUrls, parseGitHubUrlsFromComment } from './parser.js';
 import { fetchProjectDetails } from './github.js';
 import { summarizeReadme } from './llm.js';
-import { writeReportJson, writeLastChecked } from './render.js';
+import { writeLastChecked, renderRepoFeed } from './render.js';
 import { startServer, type RefreshTrigger } from './server.js';
-import type { VideoReport, VideoSource, GitHubProject, ReviewedVideo } from './types.js';
+import type { VideoSource, GitHubProject, ReviewedVideo } from './types.js';
 import { SOURCES } from './sources.js';
 
 // ── Configuration ──────────────────────────────────────────
 const OUTPUT_DIR = process.env.OUTPUT_DIR || './output';
 const STATE_FILE = process.env.STATE_FILE || './state/reviewed.json';
+const REPO_STATE_FILE = process.env.REPO_STATE_FILE || join(OUTPUT_DIR, 'repos.json');
 const VIDEO_CONCURRENCY = parseInt(process.env.VIDEO_CONCURRENCY || '3', 10);
 const PROJECT_CONCURRENCY = parseInt(process.env.PROJECT_CONCURRENCY || '5', 10);
 const LLM_CONCURRENCY = parseInt(process.env.LLM_CONCURRENCY || '3', 10);
@@ -96,17 +99,13 @@ async function processProject(p: GitHubProject): Promise<GitHubProject> {
   return detailed;
 }
 
-interface VideoResult {
-  reviewed: ReviewedVideo;
-  report: VideoReport | null;
-}
-
 async function processVideoWithDescription(
   video: { id: string; title: string; publishedText?: string; uploadDate?: string | null; thumbnails: { url: string }[] },
   description: string,
   state: { videos: ReviewedVideo[] },
+  repoState: ReturnType<typeof loadRepoState>,
   source?: VideoSource,
-): Promise<VideoResult> {
+): Promise<{ reviewed: ReviewedVideo }> {
   let projects = parseGitHubUrls(description);
 
   if (projects.length === 0) {
@@ -127,7 +126,6 @@ async function processVideoWithDescription(
         retrievedAt: new Date().toISOString(),
         projectCount: 0,
       },
-      report: null,
     };
   }
 
@@ -135,30 +133,31 @@ async function processVideoWithDescription(
     projects.map((p) => projectLimit(() => processProject(p))),
   );
 
-  const report: VideoReport = {
-    videoId: video.id,
-    title: video.title,
-    publishedAt: video.publishedText || new Date().toISOString(),
-    uploadDate: video.uploadDate ?? null,
-    thumbnailUrl: video.thumbnails[0]?.url || '',
-    videoUrl: `https://www.youtube.com/watch?v=${video.id}`,
-    projects: enrichedProjects,
-    ...(source ? { source } : {}),
-  };
+  const mentionedAt = video.uploadDate || video.publishedText || new Date().toISOString();
+  const videoUrl = `https://www.youtube.com/watch?v=${video.id}`;
 
-  const jsonPath = writeReportJson(report, OUTPUT_DIR);
-  console.log(`💾 JSON → ${jsonPath}`);
+  for (const p of enrichedProjects) {
+    upsertRepo(
+      repoState,
+      p,
+      { videoId: video.id, videoTitle: video.title, videoUrl, mentionedAt, ...(source ? { source } : {}) },
+      mentionedAt,
+    );
+  }
+  saveRepoState(REPO_STATE_FILE, repoState);
+  console.log(`💾 Repo state → ${REPO_STATE_FILE} (${enrichedProjects.length} project(s) from "${video.title}")`);
 
-  state.videos.push({
+  const reviewed: ReviewedVideo = {
     videoId: video.id,
     title: video.title,
     publishedAt: video.publishedText || new Date().toISOString(),
     retrievedAt: new Date().toISOString(),
     projectCount: enrichedProjects.length,
-  });
+  };
+  state.videos.push(reviewed);
   saveState(STATE_FILE, state);
 
-  return { reviewed: state.videos[state.videos.length - 1], report };
+  return { reviewed };
 }
 
 // ── Commands ────────────────────────────────────────────────
@@ -167,7 +166,8 @@ async function fetchReports(): Promise<void> {
   validateEnv();
   writeLastChecked(OUTPUT_DIR);
 
-  const state = reconcileStateWithOutput(loadState(STATE_FILE), OUTPUT_DIR);
+  const repoState = loadRepoState(REPO_STATE_FILE);
+  const state = reconcileStateWithRepos(loadState(STATE_FILE), repoState);
   saveState(STATE_FILE, state);
 
   // ── Collect tagged videos from all sources ──────────────
@@ -235,7 +235,7 @@ async function fetchReports(): Promise<void> {
   const results = await Promise.all(
     newTagged.map(({ video, source }) => {
       const description = videoDescriptions.get(video.id) || '';
-      return videoLimit(() => processVideoWithDescription(video, description, state, source));
+      return videoLimit(() => processVideoWithDescription(video, description, state, repoState, source));
     }),
   );
 
@@ -246,10 +246,10 @@ async function fetchReports(): Promise<void> {
 async function render(): Promise<void> {
   console.log('🎨 GithubAwesome Monitor — render\n');
 
-  const { renderAllJson } = await import('./render.js');
-  renderAllJson(OUTPUT_DIR);
+  const repoState = loadRepoState(REPO_STATE_FILE);
+  renderRepoFeed(OUTPUT_DIR, repoState);
 
-  console.log('\n✨ Render complete!');
+  console.log(`\n✨ Render complete! (${repoState.repos.length} repos)`);
 }
 
 let isRunning = false;
@@ -347,7 +347,7 @@ async function daemon(): Promise<void> {
   }
   validateEnvOrExit();
 
-  startServer(OUTPUT_DIR, PORT, triggerRefresh);
+  startServer(OUTPUT_DIR, PORT, REPO_STATE_FILE, triggerRefresh);
 
   console.log(`🕐 Daemon mode — schedule: ${CRON_SCHEDULE}\n`);
 
@@ -404,8 +404,8 @@ function printUsage(): void {
   console.log(`Usage: bun run src/index.ts <command>
 
 Commands:
-  fetch    Fetch new videos and gather data (writes JSON to output dir)
-  render   Render JSON data files to HTML
+  fetch    Fetch new videos and gather data (updates the repo state)
+  render   Render the repo feed (output/index.html) from repo state
   run      Fetch + render (one-shot, no server)
   serve    Start the HTTP server only (serves existing output dir)
   daemon   Start the HTTP server and fetch + render on a CRON_SCHEDULE
@@ -438,7 +438,7 @@ async function main(): Promise<void> {
       await runOnce();
       break;
     case 'serve':
-      startServer(OUTPUT_DIR, PORT, triggerRefresh);
+      startServer(OUTPUT_DIR, PORT, REPO_STATE_FILE, triggerRefresh);
       break;
     case 'daemon':
     case undefined:

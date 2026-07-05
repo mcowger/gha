@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readReportJson, renderAllJson, renderReportToJson, writeReportJson } from './render.js';
-import type { VideoReport } from './types.js';
+import { renderRepoFeed, writeLastChecked } from './render.js';
+import type { RepoEntry, RepoStateFile } from './types.js';
 
 let outputDir: string;
 
@@ -15,72 +15,69 @@ afterEach(() => {
   rmSync(outputDir, { recursive: true, force: true });
 });
 
-function makeReport(overrides: Partial<VideoReport> = {}): VideoReport {
+function makeRepo(overrides: Partial<RepoEntry> = {}): RepoEntry {
   return {
-    videoId: 'vid1',
-    title: 'Test Video',
-    publishedAt: '2026-01-01T00:00:00.000Z',
-    uploadDate: '2026-01-01T00:00:00.000Z',
-    thumbnailUrl: 'https://example.com/thumb.jpg',
-    videoUrl: 'https://www.youtube.com/watch?v=vid1',
-    projects: [
+    owner: 'owner',
+    repo: 'repo',
+    url: 'https://github.com/owner/repo',
+    description: 'a description',
+    stars: 42,
+    language: 'TypeScript',
+    summary: 'a summary',
+    firstDiscoveredAt: '2026-01-01T00:00:00.000Z',
+    mentions: [
       {
-        owner: 'owner',
-        repo: 'repo',
-        url: 'https://github.com/owner/repo',
-        readme: 'some readme',
-        summary: 'a summary',
-        description: 'a description',
-        stars: 42,
-        language: 'TypeScript',
+        videoId: 'vid1',
+        videoTitle: 'Test Video',
+        videoUrl: 'https://www.youtube.com/watch?v=vid1',
+        mentionedAt: '2026-01-01T00:00:00.000Z',
       },
     ],
     ...overrides,
   };
 }
 
-describe('writeReportJson / readReportJson', () => {
-  test('round-trips a report through disk', () => {
-    const report = makeReport();
-    const jsonPath = writeReportJson(report, outputDir);
-    expect(existsSync(jsonPath)).toBe(true);
-    expect(readReportJson(jsonPath)).toEqual(report);
-  });
+describe('renderRepoFeed', () => {
+  test('writes index.html containing every repo, newest discovery first', () => {
+    const state: RepoStateFile = {
+      repos: [
+        makeRepo({ owner: 'a', repo: 'first', firstDiscoveredAt: '2026-01-01T00:00:00.000Z' }),
+        makeRepo({ owner: 'b', repo: 'second', firstDiscoveredAt: '2026-02-01T00:00:00.000Z' }),
+      ],
+    };
 
-  test('names the file after the video id and today\'s date', () => {
-    const jsonPath = writeReportJson(makeReport({ videoId: 'xyz' }), outputDir);
-    const dateStr = new Date().toISOString().slice(0, 10);
-    expect(jsonPath.endsWith(`ghawesome-${dateStr}-xyz.json`)).toBe(true);
-  });
-});
-
-describe('renderReportToJson', () => {
-  test('renders HTML alongside the JSON with a matching basename', () => {
-    const jsonPath = writeReportJson(makeReport(), outputDir);
-    const htmlPath = renderReportToJson(jsonPath, outputDir);
-    expect(htmlPath).toBe(jsonPath.replace(/\.json$/, '.html'));
-    const html = readFileSync(htmlPath, 'utf-8');
-    expect(html).toContain('<!DOCTYPE html>');
-    expect(html).toContain('owner/repo');
-  });
-});
-
-describe('renderAllJson', () => {
-  test('renders every JSON report plus an index.html', () => {
-    writeReportJson(makeReport({ videoId: 'vid1', title: 'First' }), outputDir);
-    writeReportJson(makeReport({ videoId: 'vid2', title: 'Second' }), outputDir);
-
-    const written = renderAllJson(outputDir);
-    expect(written).toHaveLength(2);
-
-    const indexPath = join(outputDir, 'index.html');
+    const indexPath = renderRepoFeed(outputDir, state);
     expect(existsSync(indexPath)).toBe(true);
-    const index = readFileSync(indexPath, 'utf-8');
-    expect(index).toContain('First');
-    expect(index).toContain('Second');
+
+    const html = readFileSync(indexPath, 'utf-8');
+    expect(html.indexOf('b/second')).toBeLessThan(html.indexOf('a/first'));
   });
 
-  test('returns an empty array when there are no JSON files', () => {
-    expect(renderAllJson(outputDir)).toEqual([]);
+  test('renders an empty list without throwing', () => {
+    const indexPath = renderRepoFeed(outputDir, { repos: [] });
+    expect(existsSync(indexPath)).toBe(true);
+  });
+
+  test('excludes repos marked viewed', () => {
+    const state: RepoStateFile = {
+      repos: [
+        makeRepo({ owner: 'a', repo: 'unviewed' }),
+        makeRepo({ owner: 'b', repo: 'seen', viewed: true }),
+      ],
+    };
+
+    const indexPath = renderRepoFeed(outputDir, state);
+    const html = readFileSync(indexPath, 'utf-8');
+    expect(html).toContain('a/unviewed');
+    expect(html).not.toContain('b/seen');
+  });
+});
+
+describe('writeLastChecked', () => {
+  test('is picked up by a subsequent renderRepoFeed call', () => {
+    writeLastChecked(outputDir, '2026-01-01T12:00:00.000Z');
+    const indexPath = renderRepoFeed(outputDir, { repos: [] });
+    const html = readFileSync(indexPath, 'utf-8');
+    expect(html).toContain('data-checked-at="2026-01-01T12:00:00.000Z"');
   });
 });
