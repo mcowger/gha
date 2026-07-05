@@ -83,6 +83,6 @@ describe.skipIf(!liveEnabled)('youtube.ts (live YouTube Data API v3)', () => {
   });
 });
 
-test.skipIf(liveEnabled)('youtube.ts throws a clear error when YOUTUBE_API_KEY is missing', async () => {
+test.skipIf(hasKey)('youtube.ts throws a clear error when YOUTUBE_API_KEY is missing', async () => {
   await expect(getChannelVideos(CHANNEL_ID, 1)).rejects.toThrow('YOUTUBE_API_KEY');
 });

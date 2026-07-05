@@ -19,6 +19,6 @@ describe.skipIf(!liveEnabled)('llm.ts (live LLM summarization)', () => {
   }, 30000);
 });
 
-test.skipIf(liveEnabled)('llm.ts resolves to null (not a throw) when LLM_API_KEY is missing', async () => {
+test.skipIf(hasKey)('llm.ts resolves to null (not a throw) when LLM_API_KEY is missing', async () => {
   await expect(summarizeReadme(SAMPLE_README, 'example', 'demo-project')).resolves.toBeNull();
 });
