@@ -157,11 +157,15 @@ describe('notifier', () => {
       expect(call.url).toBe('https://ntfy.sh/test-topic');
       expect(call.options?.method).toBe('POST');
       expect(call.options?.headers).toEqual({
-        'Title': 'awesome-owner/cool-project (⭐1,337)',
+        'Title': 'awesome-owner/cool-project (1,337 stars)',
         'Click': 'https://github.com/awesome-owner/cool-project',
         'Tags': 'star,rocket',
       });
       expect(call.options?.body).toBe('An LLM summary of the cool project');
+
+      // Bun rejects non-ASCII characters in HTTP headers, which would prevent
+      // the publish request from ever reaching ntfy.
+      expect(() => new Headers(call.options?.headers)).not.toThrow();
     });
 
     test('sends pushes to custom ntfy URL if configured', async () => {
@@ -196,12 +200,12 @@ describe('notifier', () => {
       expect(fetchCalls).toHaveLength(2);
       expect(fetchCalls[0].url).toBe('https://ntfy.sh/test-topic');
       expect(fetchCalls[0].options?.headers).toMatchObject({
-        'Title': 'awesome-owner/cool-project (⭐1,337)',
+        'Title': 'awesome-owner/cool-project (1,337 stars)',
       });
 
       expect(fetchCalls[1].url).toBe('https://ntfy.sh/test-topic');
       expect(fetchCalls[1].options?.headers).toMatchObject({
-        'Title': 'another-owner/another-project (⭐100)',
+        'Title': 'another-owner/another-project (100 stars)',
       });
     });
 

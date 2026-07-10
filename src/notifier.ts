@@ -69,7 +69,8 @@ async function sendNtfy(repos: RepoEntry[]): Promise<void> {
 
   for (const r of repos) {
     try {
-      const title = `${r.owner}/${r.repo} (⭐${r.stars?.toLocaleString() || 0})`;
+      // HTTP header values must be ASCII-compatible; use words instead of emoji.
+      const title = `${r.owner}/${r.repo} (${r.stars?.toLocaleString() || 0} stars)`;
       const body = r.summary || r.description || 'No description available';
 
       const response = await fetch(`${ntfyUrl}/${topic}`, {
