@@ -188,6 +188,30 @@ A repo mentioned in more than one video accumulates additional entries in `menti
 - **GitHub**: Sequential requests with 500ms/300ms delays between calls. Only retries on HTTP 429 (rate limit) with exponential backoff. HTTP 403 (auth failure) fails immediately rather than retrying pointlessly
 - **LLM**: One summary request per project; no special rate limiting
 
+## OpenCode GitHub Automation
+
+OpenCode provides automatic PR reviews and an interactive assistant:
+
+- `.github/workflows/opencode-review.yml` reviews non-draft PRs, including PRs from forks, when
+  they are opened, updated, reopened, or marked ready for review. Reviews are read-only and focus
+  on correctness, security, failure modes, tests, and concrete maintainability risks. A minimal
+  trusted dispatcher forwards only the PR number and immutable head SHA to an isolated
+  default-branch run. That run creates an inert patch before model secrets are exposed, and
+  OpenCode can read only that patch.
+- On an issue, PR conversation, or inline PR comment, include `@opencode`, `/opencode`, or `/oc`
+  to ask a question, request an explanation, or explicitly request a code change. Interactive runs
+  are restricted to trusted collaborators. OpenCode can create a branch and PR for issue requests
+  or commit to an existing same-repository PR branch; repository tokens cannot push to fork-owned
+  PR branches.
+
+The workflows use the built-in `GITHUB_TOKEN` and require these Actions secrets:
+
+- `LLM_API_KEY`: API credential for the OpenAI-compatible model endpoint
+- `LLM_BASE_URL`: base URL for that endpoint
+- `LLM_MODEL`: model ID used by OpenCode
+
+Session sharing is disabled. Fork reviews never execute PR code or expose model credentials to it.
+
 ## Testing
 
 ```bash
