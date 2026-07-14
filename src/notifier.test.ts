@@ -1,35 +1,15 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { sendNotifications } from './notifier.js';
+import {
+  _resetForTesting,
+  enqueueNotifications,
+  flushPendingNotifications,
+  getPendingCount,
+} from './notifier.js';
 import type { RepoEntry } from './types.js';
 
 describe('notifier', () => {
   let originalFetch: typeof globalThis.fetch;
-  let fetchCalls: Array<{ url: string; options?: RequestInit }> = [];
-  let mockFetchResponse: Response;
-
-  beforeEach(() => {
-    originalFetch = globalThis.fetch;
-    fetchCalls = [];
-    mockFetchResponse = new Response('ok', { status: 200 });
-
-    // Mock fetch globally
-    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
-      fetchCalls.push({ url: input.toString(), options: init });
-      return mockFetchResponse;
-    };
-
-    // Clean env
-    delete process.env.DISCORD_WEBHOOK_URL;
-    delete process.env.NTFY_TOPIC;
-    delete process.env.NTFY_URL;
-  });
-
-  afterEach(() => {
-    globalThis.fetch = originalFetch;
-    delete process.env.DISCORD_WEBHOOK_URL;
-    delete process.env.NTFY_TOPIC;
-    delete process.env.NTFY_URL;
-  });
+  let fetchCalls: Array<{ url: string; options?: RequestInit }>;
 
   const mockRepos: RepoEntry[] = [
     {
@@ -41,206 +21,143 @@ describe('notifier', () => {
       language: 'TypeScript',
       summary: 'An LLM summary of the cool project',
       firstDiscoveredAt: '2026-07-05T12:00:00.000Z',
-      mentions: [
-        {
-          videoId: 'vid-abc',
-          videoTitle: 'Awesome JS/TS Repos',
-          videoUrl: 'https://www.youtube.com/watch?v=vid-abc',
-          mentionedAt: '2026-07-05T12:00:00.000Z',
-        },
-      ],
+      mentions: [],
     },
   ];
 
-  test('does not call fetch if no notifications are configured', async () => {
-    await sendNotifications(mockRepos);
-    expect(fetchCalls).toHaveLength(0);
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    fetchCalls = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      fetchCalls.push({ url: input.toString(), options: init });
+      return new Response('ok', { status: 200 });
+    }) as typeof fetch;
+
+    delete process.env.DISCORD_WEBHOOK_URL;
+    delete process.env.NTFY_TOPIC;
+    delete process.env.NTFY_URL;
+    delete process.env.PUBLIC_FEED_URL;
+    delete process.env.NOTIFICATION_DEBOUNCE_MS;
+    _resetForTesting();
   });
 
-  test('does not call fetch if the repos array is empty', async () => {
+  afterEach(() => {
+    _resetForTesting();
+    globalThis.fetch = originalFetch;
+    delete process.env.DISCORD_WEBHOOK_URL;
+    delete process.env.NTFY_TOPIC;
+    delete process.env.NTFY_URL;
+    delete process.env.PUBLIC_FEED_URL;
+    delete process.env.NOTIFICATION_DEBOUNCE_MS;
+  });
+
+  test('does not send or queue an empty batch', async () => {
     process.env.DISCORD_WEBHOOK_URL = 'https://discord.com/api/webhooks/123';
-    process.env.NTFY_TOPIC = 'my-topic';
-
-    await sendNotifications([]);
+    enqueueNotifications([]);
+    expect(getPendingCount()).toBe(0);
+    await flushPendingNotifications();
     expect(fetchCalls).toHaveLength(0);
   });
 
-  describe('Discord Driver', () => {
-    test('sends a formatted payload to the webhook', async () => {
-      process.env.DISCORD_WEBHOOK_URL = 'https://discord.com/api/webhooks/123';
+  test('sends one Discord summary with the configured feed URL', async () => {
+    process.env.DISCORD_WEBHOOK_URL = 'https://discord.com/api/webhooks/123';
+    process.env.PUBLIC_FEED_URL = 'https://gha.home.cowger.us';
 
-      await sendNotifications(mockRepos);
+    enqueueNotifications(mockRepos);
+    await flushPendingNotifications();
 
-      expect(fetchCalls).toHaveLength(1);
-      const call = fetchCalls[0];
-      expect(call.url).toBe('https://discord.com/api/webhooks/123');
-      expect(call.options?.method).toBe('POST');
-      expect(call.options?.headers).toEqual({ 'Content-Type': 'application/json' });
-
-      const payload = JSON.parse(call.options?.body as string);
-      expect(payload.content).toContain('1 new GitHub repo(s) discovered!');
-      expect(payload.embeds).toHaveLength(1);
-
-      const embed = payload.embeds[0];
-      expect(embed.title).toBe('awesome-owner/cool-project');
-      expect(embed.url).toBe('https://github.com/awesome-owner/cool-project');
-      expect(embed.description).toBe('An LLM summary of the cool project');
-      expect(embed.color).toBe(0x5865F2);
-      expect(embed.timestamp).toBe('2026-07-05T12:00:00.000Z');
-
-      expect(embed.fields).toContainEqual({ name: '⭐ Stars', value: '1,337', inline: true });
-      expect(embed.fields).toContainEqual({ name: '🌐 Language', value: 'TypeScript', inline: true });
-      expect(embed.fields).toContainEqual({
-        name: '📺 Mentioned in',
-        value: '[Awesome JS/TS Repos](https://www.youtube.com/watch?v=vid-abc)',
-        inline: false,
-      });
-    });
-
-    test('chunks Discord embeds in batches of 10', async () => {
-      process.env.DISCORD_WEBHOOK_URL = 'https://discord.com/api/webhooks/123';
-
-      // Create 15 mock repositories
-      const largeRepoList: RepoEntry[] = Array.from({ length: 15 }, (_, i) => ({
-        owner: 'owner',
-        repo: `repo-${i}`,
-        url: `https://github.com/owner/repo-${i}`,
-        description: `Description ${i}`,
-        stars: i,
-        language: 'TypeScript',
-        summary: `Summary ${i}`,
-        firstDiscoveredAt: '2026-07-05T12:00:00.000Z',
-        mentions: [],
-      }));
-
-      await sendNotifications(largeRepoList);
-
-      // Should result in 2 fetch requests (10 in first, 5 in second)
-      expect(fetchCalls).toHaveLength(2);
-
-      const payload1 = JSON.parse(fetchCalls[0].options?.body as string);
-      expect(payload1.embeds).toHaveLength(10);
-      expect(payload1.content).toContain('10 new GitHub repo(s) discovered!');
-
-      const payload2 = JSON.parse(fetchCalls[1].options?.body as string);
-      expect(payload2.embeds).toHaveLength(5);
-      expect(payload2.content).toContain('5 new GitHub repo(s) discovered!');
-    });
-
-    test('gracefully handles non-ok response from Discord', async () => {
-      process.env.DISCORD_WEBHOOK_URL = 'https://discord.com/api/webhooks/123';
-      mockFetchResponse = new Response('Unauthorized', { status: 401 });
-
-      // Should not throw/reject
-      await expect(sendNotifications(mockRepos)).resolves.toBeUndefined();
-    });
-
-    test('gracefully handles connection errors', async () => {
-      process.env.DISCORD_WEBHOOK_URL = 'https://discord.com/api/webhooks/123';
-      globalThis.fetch = async () => {
-        throw new Error('Connection refused');
-      };
-
-      // Should not throw/reject
-      await expect(sendNotifications(mockRepos)).resolves.toBeUndefined();
+    expect(fetchCalls).toHaveLength(1);
+    const call = fetchCalls[0];
+    expect(call.url).toBe('https://discord.com/api/webhooks/123');
+    expect(call.options?.method).toBe('POST');
+    expect(call.options?.headers).toEqual({ 'Content-Type': 'application/json' });
+    expect(JSON.parse(call.options?.body as string)).toEqual({
+      content: '📋 **1 new repo to review** — https://gha.home.cowger.us',
     });
   });
 
-  describe('ntfy Driver', () => {
-    test('sends formatted pushes to the topic', async () => {
-      process.env.NTFY_TOPIC = 'test-topic';
+  test('sends one Discord message even for more than ten repos', async () => {
+    process.env.DISCORD_WEBHOOK_URL = 'https://discord.com/api/webhooks/123';
+    const repos = Array.from({ length: 20 }, (_, i) => ({
+      ...mockRepos[0],
+      repo: `repo-${i}`,
+    }));
 
-      await sendNotifications(mockRepos);
+    enqueueNotifications(repos);
+    await flushPendingNotifications();
 
-      expect(fetchCalls).toHaveLength(1);
-      const call = fetchCalls[0];
-      expect(call.url).toBe('https://ntfy.sh/test-topic');
-      expect(call.options?.method).toBe('POST');
-      expect(call.options?.headers).toEqual({
-        'Title': 'awesome-owner/cool-project (1,337 stars)',
-        'Click': 'https://github.com/awesome-owner/cool-project',
-        'Tags': 'star,rocket',
-      });
-      expect(call.options?.body).toBe('An LLM summary of the cool project');
-
-      // Bun rejects non-ASCII characters in HTTP headers, which would prevent
-      // the publish request from ever reaching ntfy.
-      expect(() => new Headers(call.options?.headers)).not.toThrow();
-    });
-
-    test('sends pushes to custom ntfy URL if configured', async () => {
-      process.env.NTFY_TOPIC = 'custom-topic';
-      process.env.NTFY_URL = 'https://ntfy.example.com';
-
-      await sendNotifications(mockRepos);
-
-      expect(fetchCalls).toHaveLength(1);
-      expect(fetchCalls[0].url).toBe('https://ntfy.example.com/custom-topic');
-    });
-
-    test('sends one notification per repository', async () => {
-      process.env.NTFY_TOPIC = 'test-topic';
-      const repos = [
-        ...mockRepos,
-        {
-          owner: 'another-owner',
-          repo: 'another-project',
-          url: 'https://github.com/another-owner/another-project',
-          description: 'Another project description',
-          stars: 100,
-          language: 'Go',
-          summary: 'Another project summary',
-          firstDiscoveredAt: '2026-07-05T12:00:00.000Z',
-          mentions: [],
-        },
-      ];
-
-      await sendNotifications(repos);
-
-      expect(fetchCalls).toHaveLength(2);
-      expect(fetchCalls[0].url).toBe('https://ntfy.sh/test-topic');
-      expect(fetchCalls[0].options?.headers).toMatchObject({
-        'Title': 'awesome-owner/cool-project (1,337 stars)',
-      });
-
-      expect(fetchCalls[1].url).toBe('https://ntfy.sh/test-topic');
-      expect(fetchCalls[1].options?.headers).toMatchObject({
-        'Title': 'another-owner/another-project (100 stars)',
-      });
-    });
-
-    test('gracefully handles non-ok response from ntfy', async () => {
-      process.env.NTFY_TOPIC = 'test-topic';
-      mockFetchResponse = new Response('Bad Request', { status: 400 });
-
-      // Should not throw/reject
-      await expect(sendNotifications(mockRepos)).resolves.toBeUndefined();
-    });
-
-    test('gracefully handles connection errors', async () => {
-      process.env.NTFY_TOPIC = 'test-topic';
-      globalThis.fetch = async () => {
-        throw new Error('DNS resolution failed');
-      };
-
-      // Should not throw/reject
-      await expect(sendNotifications(mockRepos)).resolves.toBeUndefined();
-    });
+    expect(fetchCalls).toHaveLength(1);
+    expect(JSON.parse(fetchCalls[0].options?.body as string).content).toBe('📋 **20 new repos to review** — https://gha.home.cowger.us');
   });
 
-  describe('Multiple Drivers Simultaneous', () => {
-    test('sends to both Discord and ntfy when both are configured', async () => {
-      process.env.DISCORD_WEBHOOK_URL = 'https://discord.com/api/webhooks/123';
-      process.env.NTFY_TOPIC = 'test-topic';
+  test('sends one ntfy summary that opens the feed URL', async () => {
+    process.env.NTFY_TOPIC = 'test-topic';
+    process.env.NTFY_URL = 'https://ntfy.example.com';
+    process.env.PUBLIC_FEED_URL = 'https://gha.home.cowger.us';
 
-      await sendNotifications(mockRepos);
+    enqueueNotifications([...mockRepos, { ...mockRepos[0], repo: 'another-project' }]);
+    await flushPendingNotifications();
 
-      // 1 to Discord, 1 to ntfy
-      expect(fetchCalls).toHaveLength(2);
-
-      const urls = fetchCalls.map((c) => c.url);
-      expect(urls).toContain('https://discord.com/api/webhooks/123');
-      expect(urls).toContain('https://ntfy.sh/test-topic');
+    expect(fetchCalls).toHaveLength(1);
+    const call = fetchCalls[0];
+    expect(call.url).toBe('https://ntfy.example.com/test-topic');
+    expect(call.options?.method).toBe('POST');
+    expect(call.options?.headers).toEqual({
+      'Title': '2 new repos to review',
+      'Tags': 'rocket,bell',
+      'Click': 'https://gha.home.cowger.us',
     });
+    expect(call.options?.body).toBe('2 new repos to review. Review them at https://gha.home.cowger.us');
+    expect(() => new Headers(call.options?.headers)).not.toThrow();
+  });
+
+  test('sends once to each configured channel', async () => {
+    process.env.DISCORD_WEBHOOK_URL = 'https://discord.com/api/webhooks/123';
+    process.env.NTFY_TOPIC = 'test-topic';
+
+    enqueueNotifications(mockRepos);
+    await flushPendingNotifications();
+
+    expect(fetchCalls).toHaveLength(2);
+    expect(fetchCalls.map((call) => call.url)).toEqual([
+      'https://discord.com/api/webhooks/123',
+      'https://ntfy.sh/test-topic',
+    ]);
+  });
+
+  test('deduplicates repos queued more than once', async () => {
+    process.env.DISCORD_WEBHOOK_URL = 'https://discord.com/api/webhooks/123';
+    enqueueNotifications(mockRepos);
+    enqueueNotifications([...mockRepos, { ...mockRepos[0], repo: 'another-project' }]);
+
+    expect(getPendingCount()).toBe(2);
+    await flushPendingNotifications();
+    expect(JSON.parse(fetchCalls[0].options?.body as string).content).toBe('📋 **2 new repos to review** — https://gha.home.cowger.us');
+  });
+
+  test('resets the timer on each enqueue (pure debounce)', async () => {
+    process.env.DISCORD_WEBHOOK_URL = 'https://discord.com/api/webhooks/123';
+    process.env.NOTIFICATION_DEBOUNCE_MS = '30';
+
+    enqueueNotifications(mockRepos);
+    await Bun.sleep(20);
+    enqueueNotifications([{ ...mockRepos[0], repo: 'another-project' }]);
+    await Bun.sleep(20);
+
+    expect(fetchCalls).toHaveLength(0);
+    expect(getPendingCount()).toBe(2);
+
+    await Bun.sleep(20);
+    expect(fetchCalls).toHaveLength(1);
+    expect(JSON.parse(fetchCalls[0].options?.body as string).content).toBe('📋 **2 new repos to review** — https://gha.home.cowger.us');
+  });
+
+  test('handles a failed channel without rejecting the flush', async () => {
+    process.env.DISCORD_WEBHOOK_URL = 'https://discord.com/api/webhooks/123';
+    globalThis.fetch = (async () => new Response('Unauthorized', { status: 401 })) as unknown as typeof fetch;
+
+    enqueueNotifications(mockRepos);
+    await expect(flushPendingNotifications()).resolves.toBeUndefined();
+    expect(getPendingCount()).toBe(0);
   });
 });

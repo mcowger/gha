@@ -58,6 +58,11 @@ All configuration is via environment variables (set in `.env` or exported). YouT
 | `REPO_STATE_FILE` | No | `${OUTPUT_DIR}/repos.json` | Path to the per-repo state file |
 | `PORT` | No | `8080` | Port for the built-in HTTP server |
 | `CRON_SCHEDULE` | No | — | Cron expression for daemon mode, e.g. `0 */6 * * *` |
+| `DISCORD_WEBHOOK_URL` | No | — | Discord webhook to receive new-repo notifications |
+| `NTFY_TOPIC` | No | — | ntfy topic to receive new-repo notifications |
+| `NTFY_URL` | No | `https://ntfy.sh` | Base URL for ntfy (supports self-hosted instances) |
+| `NOTIFICATION_DEBOUNCE_MS` | No | `600000` | Wait time in milliseconds after the last newly discovered repo before sending one notification (10 minutes) |
+| `PUBLIC_FEED_URL` | No | `https://gha.home.cowger.us` | Public feed URL included in notifications |
 
 ## Usage
 
@@ -103,6 +108,10 @@ The index page is rendered dynamically on every request (not a static file), so 
 - **Mark viewed** — `POST /api/viewed` sets `viewed: true` on the repo in `repos.json`; viewed repos are hidden from the default feed. Click "👁 Show all" in the header (`/?all=true`) to see them again.
 - **Star** — `POST /api/star` calls the GitHub API (via `GH_TOKEN`) to star the repo for the authenticated user and sets `starred: true` in `repos.json`. Both actions are one-directional from the UI — there's no "unview"/"unstar" control.
 - **Add to list** — pick one of your [GitHub Lists](https://github.com/stars) from the dropdown and click "+ Add to list"; `POST /api/lists` calls the GitHub API (via `GH_TOKEN`) to add the repo to that list without removing it from any list it's already in. GitHub Lists have no official public API, so this relies on the same undocumented GraphQL fields the github.com web UI itself uses — it could stop working if GitHub changes them. If `GH_TOKEN` is unset or the API call fails, the dropdown is simply omitted rather than erroring out.
+
+### Notifications
+
+Configure `DISCORD_WEBHOOK_URL`, `NTFY_TOPIC`, or both to receive one summary notification per batch of newly discovered repos. Notifications use a **pure debounce**: each newly discovered repo resets the `NOTIFICATION_DEBOUNCE_MS` timer, and after no new repos arrive for the configured window (10 minutes by default), each enabled channel receives one message such as "20 new repos to review". Set `PUBLIC_FEED_URL=https://gha.home.cowger.us` so the notification links directly to the feed. Pending notifications are held in memory and are flushed immediately on a graceful daemon shutdown.
 
 ## Project Structure
 

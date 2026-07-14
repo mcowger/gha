@@ -4,7 +4,7 @@ import { join } from 'node:path';
 
 import { loadState, saveState, isReviewed, reconcileStateWithRepos } from './state.js';
 import { loadRepoState, saveRepoState, upsertRepo, findRepo } from './repos.js';
-import { sendNotifications } from './notifier.js';
+import { enqueueNotifications, flushPendingNotifications } from './notifier.js';
 import { getChannelVideos, getPlaylistVideos, getVideoDescription, getVideoUploadDate, getPinnedComment } from './youtube.js';
 import { parseGitHubUrls, parseGitHubUrlsFromComment } from './parser.js';
 import { fetchProjectDetails } from './github.js';
@@ -254,8 +254,8 @@ async function fetchReports(): Promise<void> {
   console.log(`\n✨ Fetch complete! ${results.length} videos, ${projectCount} projects processed`);
 
   if (newRepos.length > 0) {
-    console.log(`📢 Sending notifications for ${newRepos.length} new repository/repositories...`);
-    await sendNotifications(newRepos);
+    console.log(`📢 Queued ${newRepos.length} new repo(s) for debounced notification delivery.`);
+    enqueueNotifications(newRepos);
   }
 }
 
@@ -370,16 +370,17 @@ async function daemon(): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let running = true;
 
-  const cleanup = (): void => {
+  const cleanup = async (): Promise<void> => {
     if (!running) return;
     running = false;
     if (timer) clearTimeout(timer);
-    console.log('\n🛑 Shutting down...');
+    console.log('\n🛑 Shutting down — flushing pending notifications...');
+    await flushPendingNotifications();
     process.exit(0);
   };
 
-  process.on('SIGTERM', cleanup);
-  process.on('SIGINT', cleanup);
+  process.on('SIGTERM', () => { void cleanup(); });
+  process.on('SIGINT', () => { void cleanup(); });
 
   // Run immediately on startup
   try {
@@ -445,6 +446,7 @@ async function main(): Promise<void> {
     case 'fetch':
       validateEnvOrExit();
       await fetchReports();
+      await flushPendingNotifications();
       break;
     case 'render':
       await render();
@@ -452,6 +454,7 @@ async function main(): Promise<void> {
     case 'run':
       validateEnvOrExit();
       await runOnce();
+      await flushPendingNotifications();
       break;
     case 'serve':
       startServer(OUTPUT_DIR, PORT, REPO_STATE_FILE, triggerRefresh);
