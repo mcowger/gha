@@ -1,56 +1,83 @@
 #!/usr/bin/env bun
 
-import { spawn } from "child_process";
+/**
+ * Initialize a freshly-created worktree.
+ *
+ * This script intentionally avoids external dependencies because it is expected
+ * to run before `bun install`. Keep commands as argv arrays instead of shell
+ * strings so they work on Linux, macOS, and Windows.
+ */
 
 type Command = {
-  label: string;
-  cmd: string[];
-  ignoreError?: boolean;
+  readonly label: string;
+  readonly cmd: readonly string[];
 };
 
-const commands: Command[] = [
-  { label: "Update dependencies", cmd: ["bun", "install"] },
-  { label: "Fetch latest AI agent skills", cmd: ["npx", "-y", "@mcowger/agent-skills@latest"], ignoreError: true },
-  { label: "Stage skill updates", cmd: ["git", "add", ".agents"], ignoreError: true },
-  { label: "Commit skill updates (if any)", cmd: ["git", "commit", "-m", "chore: update agent skills"], ignoreError: true }
+const commands: readonly Command[] = [
+  {
+    label: 'Fetch latest main from origin',
+    cmd: ['git', 'fetch', 'origin', 'main:refs/remotes/origin/main'],
+  },
+  { label: 'Rebase worktree onto origin/main', cmd: ['git', 'rebase', 'origin/main'] },
+  { label: 'Install Bun dependencies', cmd: ['bun', 'install'] },
+  {
+    label: 'Update Agent Skills',
+    // Using `|| true` to ensure network failures don't crash the worktree setup
+    cmd: ['sh', '-c', 'bunx --bun @mcowger/agent-skills@latest experimental_install || true'],
+  },
+  {
+    label: 'Auto-commit updated skills (if changed)',
+    cmd: [
+      'sh',
+      '-c',
+      'git add .agents/skills/ && git diff-index --quiet HEAD || git commit -m "chore(skills): auto-update agent skills" || true',
+    ],
+  },
 ];
 
-async function runCommand({ label, cmd, ignoreError }: Command) {
-  console.log(`\n\x1b[36m▶ ${label}\x1b[0m`);
-  console.log(`\x1b[90m$ ${cmd.join(" ")}\x1b[0m`);
+function quoteArg(arg: string): string {
+  return /\s/.test(arg) ? JSON.stringify(arg) : arg;
+}
 
-  return new Promise<void>((resolve, reject) => {
-    const proc = spawn(cmd[0], cmd.slice(1), { stdio: "inherit" });
+function formatCommand(command: readonly string[]): string {
+  return command.map(quoteArg).join(' ');
+}
 
-    proc.on("close", (code) => {
-      if (code === 0) {
-        console.log(`\x1b[32m✔ Success\x1b[0m`);
-        resolve();
-      } else {
-        const msg = `Command failed with code ${code}`;
-        if (ignoreError) {
-          console.log(`\x1b[33m⚠ Ignored error: ${msg}\x1b[0m`);
-          resolve();
-        } else {
-          console.error(`\x1b[31m✖ ${msg}\x1b[0m`);
-          reject(new Error(msg));
-        }
-      }
+async function runCommand(command: Command): Promise<void> {
+  console.log(`\n==> ${command.label}`);
+  console.log(`$ ${formatCommand(command.cmd)}`);
+
+  let proc: import("bun").Subprocess<"inherit", "inherit", "inherit">;
+  try {
+    proc = Bun.spawn([...command.cmd], {
+      stdin: 'inherit',
+      stdout: 'inherit',
+      stderr: 'inherit',
+      env: Bun.env,
     });
-  });
-}
-
-async function main() {
-  console.log("Initializing workspace...");
-  for (const command of commands) {
-    try {
-      await runCommand(command);
-    } catch (err) {
-      console.error("\x1b[31mInitialization failed. Stopping.\x1b[0m");
-      process.exit(1);
-    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to start command: ${formatCommand(command.cmd)}\n${message}`);
   }
-  console.log("\n\x1b[32mWorkspace initialized successfully!\x1b[0m");
+
+  const exitCode = await proc.exited;
+  if (exitCode !== 0) {
+    throw new Error(`Command failed with exit code ${exitCode}: ${formatCommand(command.cmd)}`);
+  }
 }
 
-main();
+async function main(): Promise<void> {
+  for (const command of commands) {
+    await runCommand(command);
+  }
+
+  console.log('\nWorktree initialization complete.');
+}
+
+try {
+  await main();
+} catch (error) {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`\n${message}`);
+  process.exit(1);
+}
