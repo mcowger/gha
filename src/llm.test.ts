@@ -1,4 +1,3 @@
-import 'dotenv/config';
 import { describe, expect, test } from 'bun:test';
 import { summarizeReadme } from './llm.js';
 

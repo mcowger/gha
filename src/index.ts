@@ -1,4 +1,3 @@
-import 'dotenv/config';
 import pLimit from 'p-limit';
 import { join } from 'node:path';
 
@@ -307,51 +306,6 @@ async function runOnce(): Promise<void> {
 }
 
 /**
- * Parse a cron expression (e.g. "0 *\/6 * * *") and return ms until next run.
- * Supports: minute, hour, dayOfMonth, month, dayOfWeek.
- * Handles: wildcard, step (every N), and specific values.
- */
-function getNextCronDelay(expression: string): number {
-  const parts = expression.trim().split(/\s+/);
-  if (parts.length !== 5) throw new Error(`Invalid cron: ${expression}`);
-
-  const [minuteField, hourField, , ,] = parts;
-
-  const parseField = (field: string, min: number, max: number): number[] => {
-    if (field === '*') return Array.from({ length: max - min + 1 }, (_, i) => min + i);
-    if (field.startsWith('*/')) {
-      const step = parseInt(field.slice(2), 10);
-      return Array.from({ length: Math.floor((max - min) / step) + 1 }, (_, i) => min + i * step);
-    }
-    return field.split(',').map(Number);
-  };
-
-  const minutes = parseField(minuteField, 0, 59);
-  const hours = parseField(hourField, 0, 23);
-
-  const now = new Date();
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-
-  // Find next occurrence (check next 48 hours)
-  for (let offset = 0; offset < 48; offset++) {
-    const day = new Date(startOfToday);
-    day.setDate(day.getDate() + offset);
-
-    for (const h of hours) {
-      for (const m of minutes) {
-        const candidate = new Date(day.getFullYear(), day.getMonth(), day.getDate(), h, m, 0);
-        if (candidate.getTime() > now.getTime()) {
-          return candidate.getTime() - now.getTime();
-        }
-      }
-    }
-  }
-
-  // Fallback: 6 hours
-  return 6 * 60 * 60 * 1000;
-}
-
-/**
  * Daemon mode: starts the self-serving HTTP server immediately (serving whatever
  * reports already exist on disk), then fetches + renders on a CRON_SCHEDULE,
  * updating the same output directory the server reads from.
@@ -367,13 +321,13 @@ async function daemon(): Promise<void> {
 
   console.log(`🕐 Daemon mode — schedule: ${CRON_SCHEDULE}\n`);
 
-  let timer: ReturnType<typeof setTimeout> | null = null;
+  let cronJob: Bun.CronJob | null = null;
   let running = true;
 
   const cleanup = async (): Promise<void> => {
     if (!running) return;
     running = false;
-    if (timer) clearTimeout(timer);
+    cronJob?.stop();
     console.log('\n🛑 Shutting down — flushing pending notifications...');
     await flushPendingNotifications();
     process.exit(0);
@@ -391,29 +345,21 @@ async function daemon(): Promise<void> {
 
   if (!running) return;
 
-  // Schedule subsequent runs
-  const scheduleNext = (): void => {
-    if (!running) return;
-    const delay = getNextCronDelay(CRON_SCHEDULE);
-    const next = new Date(Date.now() + delay);
-    console.log(`\n⏰ Next run at ${next.toISOString()} (in ${Math.round(delay / 60000)} min)\n`);
+  const next = Bun.cron.parse(CRON_SCHEDULE);
+  if (next) console.log(`\n⏰ Next run at ${next.toISOString()}\n`);
 
-    timer = setTimeout(async () => {
+  cronJob = Bun.cron(CRON_SCHEDULE, async () => {
       if (!running) return;
       if (isRunning) {
         console.log('⏭  Skipping scheduled run — a refresh is already in progress');
-      } else {
-        try {
-          await runOnceTracked();
-        } catch (err) {
-          console.error(`Run failed: ${err instanceof Error ? err.message : err}`);
-        }
+        return;
       }
-      scheduleNext();
-    }, delay);
-  };
-
-  scheduleNext();
+      try {
+        await runOnceTracked();
+      } catch (err) {
+        console.error(`Run failed: ${err instanceof Error ? err.message : err}`);
+      }
+    });
 }
 
 // ── CLI ─────────────────────────────────────────────────────

@@ -1,25 +1,8 @@
-import { existsSync, statSync } from 'node:fs';
-import { join, normalize } from 'node:path';
 import { generateRepoFeedHtml } from './html.js';
 import { readLastChecked } from './render.js';
 import { loadRepoState, saveRepoState, findRepo, markViewed, markStarred } from './repos.js';
 import { starRepo, getUserLists, addRepoToList } from './github.js';
 import type { GitHubList } from './types.js';
-
-const CONTENT_TYPES: Record<string, string> = {
-  '.html': 'text/html; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.svg': 'image/svg+xml',
-};
-
-function contentTypeFor(path: string): string {
-  const ext = path.slice(path.lastIndexOf('.'));
-  return CONTENT_TYPES[ext] || 'application/octet-stream';
-}
 
 function jsonResponse(body: unknown, status: number = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -67,17 +50,16 @@ export function startServer(
 ): void {
   Bun.serve({
     port,
-    async fetch(req) {
-      const url = new URL(req.url);
-
-      if (url.pathname === '/api/refresh') {
+    routes: {
+      '/': (req) => renderFeed(req, outputDir, repoStateFile),
+      '/index.html': (req) => renderFeed(req, outputDir, repoStateFile),
+      '/api/refresh': (req) => {
         if (req.method !== 'POST') return jsonResponse({ error: 'Method not allowed' }, 405);
         if (!onRefresh) return jsonResponse({ error: 'Refresh not available' }, 501);
         const status = onRefresh();
         return jsonResponse({ status }, status === 'started' ? 202 : 409);
-      }
-
-      if (url.pathname === '/api/viewed') {
+      },
+      '/api/viewed': async (req) => {
         if (req.method !== 'POST') return jsonResponse({ error: 'Method not allowed' }, 405);
         const target = await readRepoBody(req);
         if (!target) return jsonResponse({ error: 'owner and repo are required' }, 400);
@@ -85,9 +67,8 @@ export function startServer(
         if (!markViewed(state, target.owner, target.repo, true)) return jsonResponse({ error: 'Repo not found' }, 404);
         saveRepoState(repoStateFile, state);
         return jsonResponse({ status: 'ok' });
-      }
-
-      if (url.pathname === '/api/star') {
+      },
+      '/api/star': async (req) => {
         if (req.method !== 'POST') return jsonResponse({ error: 'Method not allowed' }, 405);
         const target = await readRepoBody(req);
         if (!target) return jsonResponse({ error: 'owner and repo are required' }, 400);
@@ -101,9 +82,8 @@ export function startServer(
         markStarred(state, target.owner, target.repo, true);
         saveRepoState(repoStateFile, state);
         return jsonResponse({ status: 'ok' });
-      }
-
-      if (url.pathname === '/api/lists') {
+      },
+      '/api/lists': async (req) => {
         if (req.method !== 'POST') return jsonResponse({ error: 'Method not allowed' }, 405);
         const target = await readListBody(req);
         if (!target) return jsonResponse({ error: 'owner, repo, and listId are required' }, 400);
@@ -115,37 +95,25 @@ export function startServer(
           return jsonResponse({ error: err instanceof Error ? err.message : String(err) }, 502);
         }
         return jsonResponse({ status: 'ok' });
-      }
-
-      const pathname = decodeURIComponent(url.pathname);
-
-      if (pathname === '/' || pathname === '/index.html') {
-        const state = loadRepoState(repoStateFile);
-        const showingAll = url.searchParams.get('all') === 'true';
-        const repos = state.repos
-          .filter((r) => showingAll || !r.viewed)
-          .sort((a, b) => b.firstDiscoveredAt.localeCompare(a.firstDiscoveredAt));
-        const lists = await getUserListsSafe();
-        const html = generateRepoFeedHtml(repos, readLastChecked(outputDir), showingAll, lists);
-        return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
-      }
-
-      // Guard against path traversal outside outputDir.
-      const filePath = normalize(join(outputDir, pathname));
-      if (!filePath.startsWith(normalize(outputDir))) {
-        return new Response('Forbidden', { status: 403 });
-      }
-
-      if (!existsSync(filePath) || !statSync(filePath).isFile()) {
-        return new Response('Not found', { status: 404 });
-      }
-
-      const file = Bun.file(filePath);
-      return new Response(file, {
-        headers: { 'Content-Type': contentTypeFor(filePath) },
-      });
+      },
+      '/*': { dir: outputDir },
+    },
+    async fetch(req) {
+      return new Response('Not found', { status: 404 });
     },
   });
 
   console.log(`🌐 Serving reports from ${outputDir} on http://0.0.0.0:${port}`);
+}
+
+async function renderFeed(req: Request, outputDir: string, repoStateFile: string): Promise<Response> {
+  const url = new URL(req.url);
+  const state = loadRepoState(repoStateFile);
+  const showingAll = url.searchParams.get('all') === 'true';
+  const repos = state.repos
+    .filter((r) => showingAll || !r.viewed)
+    .sort((a, b) => b.firstDiscoveredAt.localeCompare(a.firstDiscoveredAt));
+  const lists = await getUserListsSafe();
+  const html = generateRepoFeedHtml(repos, readLastChecked(outputDir), showingAll, lists);
+  return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
 }

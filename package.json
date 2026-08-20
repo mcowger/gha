@@ -2,21 +2,23 @@
   "name": "github-awesome-monitor",
   "version": "1.0.0",
   "type": "module",
+  "packageManager": "bun@1.4.0",
   "scripts": {
     "init-worktree": "bun run scripts/init_worktree.ts",
     "start": "bun run src/index.ts",
     "dev": "bun --watch src/index.ts",
     "test": "bun test",
-    "test:live": "RUN_LIVE_TESTS=1 bun test"
+    "test:coverage": "bun test --coverage",
+    "test:live": "RUN_LIVE_TESTS=1 bun test",
+    "test:parallel": "bun test --parallel"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "^0.80.3",
     "@octokit/rest": "latest",
-    "dotenv": "latest",
     "p-limit": "^7.3.0"
   },
   "devDependencies": {
-    "@types/bun": "latest",
+    "bun-types": "1.4.0",
     "typescript": "latest"
   }
 }

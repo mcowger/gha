@@ -1,4 +1,3 @@
-import 'dotenv/config';
 import { describe, expect, test } from 'bun:test';
 import { fetchProjectDetails, fetchReadme, fetchRepoInfo, getUserLists } from './github.js';
 

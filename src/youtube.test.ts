@@ -1,4 +1,3 @@
-import 'dotenv/config';
 import { beforeAll, describe, expect, test } from 'bun:test';
 import {
   getChannelVideos,

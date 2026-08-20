@@ -1,10 +1,10 @@
-FROM --platform=$BUILDPLATFORM oven/bun:latest AS build
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.0 AS build
 WORKDIR /app
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile
 COPY . .
 
-FROM --platform=$TARGETPLATFORM oven/bun:latest
+FROM --platform=$TARGETPLATFORM oven/bun:1.4.0
 WORKDIR /app
 COPY --from=build /app /app
 

@@ -138,7 +138,6 @@ src/
 | YouTube Data API v3 (plain `fetch`) | Official, stable YouTube API — no scraping, generous free quota |
 | [`@octokit/rest`](https://github.com/octokit/rest.js) | Official GitHub REST API client |
 | [`@earendil-works/pi-ai`](https://github.com/earendil-works/pi) | Unified LLM API for multiple providers |
-| [`dotenv`](https://github.com/motdotla/dotenv) | Environment variable loading from `.env` |
 | Bun's built-in `Bun.serve()` | Self-contained static file server for reports |
 
 ## State File
@@ -225,6 +224,8 @@ Session sharing is disabled. Fork reviews never execute PR code or expose model 
 
 ```bash
 bun test
+bun run test:coverage   # collect line and function coverage
+bun run test:parallel   # run test files in parallel workers
 ```
 
 Uses Bun's built-in test runner. Tests fall into two groups:
