@@ -13,12 +13,12 @@
     "test:parallel": "bun test --parallel"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "^0.80.3",
-    "@octokit/rest": "latest",
-    "p-limit": "^7.3.0"
+    "@earendil-works/pi-ai": "^0.84.4",
+    "@octokit/rest": "^22.0.1",
+    "p-limit": "^7.3.1"
   },
   "devDependencies": {
     "bun-types": "1.4.0",
-    "typescript": "latest"
+    "typescript": "7.0.2"
   }
 }
